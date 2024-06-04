@@ -11,7 +11,17 @@
 // #define DEPLOY
 // #define PREPROCESS_TEST
 // #define ETHERNET_TEST
-#define AI_TEST
+// #define AI_TEST
+
+// AI Test
+// #include "ai_datatypes_defines.h"
+// #include "ai_platform.h"
+// #include "network.h"
+// #include "network_data.h"
+
+
+#define TREE_TEST
+#include "decision_tree_68_int32.h"
 
 // Ethernet information/setup variables
 uint8_t mac[] = {0x00, 0xAA, 0xBB, 0xCC, 0xDA, 0x02};
@@ -27,7 +37,9 @@ uint16_t seqTracker(0);
 int32_t magnitudes[FRAME_SIZE/2*NUM_FRAMES]; // spectrogram developed out of raw audio data
 const uint32_t dataSize = LONG_STORE_LENGTH / 3; // Total number of samples in longStore
 const uint32_t iters = dataSize / HOP_LENGTH; // Number of individual FFTs we need to store
+float magFloats[FRAME_SIZE/2*NUM_FRAMES];
 
+#ifdef AI_TEST
 float inferenceResult;
 ai_error ai_err;
 ai_i32 nbatch;
@@ -44,7 +56,7 @@ ai_network_params ai_params = {
     AI_NETWORK_DATA_WEIGHTS(ai_network_data_weights_get()),
     AI_NETWORK_DATA_ACTIVATIONS(activations)
 };
-
+#endif //AI_TEST
 
 void test_setup()
 {
@@ -60,6 +72,13 @@ void test_setup()
                 longStore[j + ioffset + koffset] = base[j];
             }
         }
+    }
+}
+
+void intToFloatMags(int32_t* intMags, float* floatMags){
+    for (int i=0; i<FRAME_SIZE/2*NUM_FRAMES; i++){
+        floatMags[i]= (float) intMags[i];
+        if (floatMags[i]<0) floatMags[i] = 0;
     }
 }
 
@@ -292,6 +311,17 @@ void loop()
     delay(500);
 
 #endif // AI_TEST
+
+#ifdef TREE_TEST
+    test_setup();
+    preprocess(longStore, dataSize, magnitudes, iters);
+    intToFloatMags(magnitudes, magFloats);
+    const int32_t predicted_class = dt_predict(magFloats, FRAME_SIZE/2*NUM_FRAMES);
+    if (predicted_class){
+        Serial.println("EVENT DETECTED LETS FUCKING GOOOOOOO");
+    }
+
+#endif //TREE_TEST
 
 #endif // DEPLOY
 }
