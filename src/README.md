@@ -39,3 +39,22 @@ ML People - how did you use EML?
 Constants are defined in the [config.hpp](config.hpp) file. These constants and the rest of the codebase have been set up such that changing these constants (for example, to increase the size of spectrograms/amount of raw audio data stored) should be possible and easy, allowing models to become larger or smaller quickly and easily. Limited testing has been done and it does appear to work, but no promises!
 
 Individual tests for ethernet communication, neural networks, decision trees and preprocessing can also be found in [main.cpp](main.cpp), and there are preprocessed constants available to test each part individually before deploying. To test, comment out `#define DEPLOY`, `#define AI_DEPLOY` and `#TREE_DEPLOY` near the top of the file, and uncomment the required test defines to test individually.
+
+Rate-monotonic scheduling analysis has been done using the individual tests, and the following performance is found. 
+
+Neural network:
+
+| Task                        | Initiation Interval | Execution time | $\lceil \frac{\tau_n}{\tau_i} \rceil T_i$ | $\frac{T_i}{\tau_i} $|
+|-----------------------------|:-------------------:|:--------------:|:-----------------------------------------:|:----------:|
+| Preprocessing and Inference |         750         | 83.245         | 83.245                                    | 0.1110     |
+|      UDP Communication      |         750         | 627.673        | 627.673                                   | 0.8369     |
+|             Sum             |                     |                |                  710.918                  |   0.9479   |
+
+Decision Tree:
+| Task                        | Initiation Interval | Execution time | $\lceil \frac{\tau_n}{\tau_i} \rceil T_i$ | $\frac{T_i}{\tau_i} $|
+|-----------------------------|:-------------------:|:--------------:|:-----------------------------------------:|:----------:|
+| Preprocessing and Inference |         750         | 83.245         | 83.245                                    | 0.1110     |
+|      UDP Communication      |         750         | 627.673        | 627.673                                   | 0.8369     |
+|             Sum             |                     |                |                  710.918                  |   0.9479   |
+
+These results show that, as long as we have an initiation interval above 710.918ms, this model is deployable in a multithreaded fashion. However, due to the udp communication taking 627ms to process and store around 500ms of audio, we will consistently lose around 127 ms of audio in between samples. While unfortunate, this is unavoidable unless deployed on a microcontroller with a higher clock rate. 
