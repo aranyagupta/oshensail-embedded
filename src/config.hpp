@@ -26,6 +26,13 @@
 #define FRAME_SIZE 256 // 1024/96000 = 10.6ms frame size and power of 2 for FFT 
 #define LONG_STORE_LENGTH FRAME_SIZE*NUM_FRAMES*3 // number of bytes in long store
 #define HOP_LENGTH 1024 // Number of samples between hops
+#define MAG_LENGTH (FRAME_SIZE/2 + 1)*LONG_STORE_LENGTH / (3*HOP_LENGTH) // length of magnitudes spectrogram
+
+// Neural net constants
+#define NUM_INPUTS MAG_LENGTH // number of inputs into inference model
+#define NUM_OUTPUTS 1 // number of outputs
+#define TENSOR_ARENA_SIZE 1024*28 // tensor arena size - may need to be increased/decreased according to model reqs
+#define THRESHOLD 0.5 // threshold for accepted guess
 
 #define PI 3.1415926535897932384626433832795
 #define RAD_TO_ANGLE 162.974662f // Conversion from radians to arbitrary angle units used by fast sine/cosine

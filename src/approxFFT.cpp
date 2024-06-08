@@ -267,7 +267,7 @@ void Approx_FFT(char in[], uint16_t N, float Frequency, int32_t out_r[], int32_t
   fstp = fstep;
   fout = 0;
   fm = 0;
-  for (int i = 1; i < Pow2[o - 1]; i++) // getting amplitude from compex  number
+  for (int i = 1; i < Pow2[o - 1]+1; i++) // getting amplitude from compex  number
   {
     out_r[i] = fastRSS(out_r[i], out_im[i]);
     // Approx RSS function used to calculated magnitude quickly
@@ -281,7 +281,7 @@ void Approx_FFT(char in[], uint16_t N, float Frequency, int32_t out_r[], int32_t
   }
 
   // fix minor bug where some values are exaggerated to negative max value - set them to 0
-  for (int i=0; i<Pow2[o - 1]; i++){
+  for (int i=0; i<Pow2[o - 1]+1; i++){
     if (out_r[i]<-100000 || out_r[i]>100000){
       out_r[i] = 0;
     }

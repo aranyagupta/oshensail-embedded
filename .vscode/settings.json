@@ -4,6 +4,8 @@
         "*.tcc": "cpp",
         "layers_pool.h": "c",
         "approxfft.h": "c",
-        "trac.h": "c"
+        "trac.h": "c",
+        "cstdint": "cpp",
+        "compare": "cpp"
     }
 }

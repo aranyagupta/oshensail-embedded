@@ -1,6 +1,6 @@
 // Following http://mirlab.org/jang/books/audiosignalprocessing/speechFeatureMfcc.asp?title=12-2%20MFCC
 #include "preprocess.hpp"
-#include <Arduino.h>
+
 const uint16_t hammingCoeffs[FRAME_SIZE] = {
   20, 20, 20, 20, 21, 21, 21, 22, 22, 23, 24, 24, 25, 26, 27, 28, 29, 30, 31, 33, 34, 35, 37, 38, 40, 42, 43, 45, 47, 49, 51, 53,
    55, 57, 59, 61, 63, 66, 68, 70, 73, 75, 78, 80, 83, 85, 88, 91, 93, 96, 99, 101, 104, 107, 110, 113, 115, 118, 121, 124, 127, 
@@ -67,14 +67,10 @@ inline void hammingWindowing(char* longStore, uint32_t dataSize){
       longStore[3*i+2+frameOffset] = (bytesToInt&0x0000FF00) >> 8;
     } 
   }
-
-  // set end bytes to 0 as not all samples will be in frames
-  // uint16_t numBytes = dataSize*3 - FRAME_SIZE*iters*3;
-  // memset(longStore+FRAME_SIZE*iters*3, 0, numBytes);
 }
 
 
-// Preprocesses data into cepstrum coefficients 
+// Preprocesses data into magnitudes 
 // longStore is the raw bytes data taken from hydrophone
 // dataSize is the number of SAMPLES on the hydrophone, NOT the number of bytes
 // cepstrumCoeffs is an (empty) buffer into which coeffs will be placed
@@ -93,7 +89,7 @@ void preprocess(char* longStore, uint32_t dataSize, int32_t* magnitudes, const u
     // stores one frame's worth of frequencies and magnitudes at a time. each frame contains 1024 samples*3 bytes of data
     // store into temporary area to avoid memory overwriting errors
     Approx_FFT(longStore+i*HOP_LENGTH*3, FRAME_SIZE, SAMPLE_RATE, temp_mag, temp_freq);
-    memcpy(magnitudes+i*FRAME_SIZE/2, temp_mag, FRAME_SIZE/2*4); // 4 bytes per int
+    memcpy(magnitudes+i*(FRAME_SIZE/2+1), temp_mag, (FRAME_SIZE/2+1)*4); // 4 bytes per int
   }
 
   // TODO: normalisation of magnitudes

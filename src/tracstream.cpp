@@ -1,6 +1,6 @@
 #include "trac.hpp"
 
-uint16_t longStoreTracker(0);
+uint32_t longStoreTracker(0);
 // Receive a datagram from UDP and put it into liveData
 void receiveDatagram(EthernetUDP& tracStreamServer, char* liveData){
   int32_t packetSize = tracStreamServer.parsePacket();
