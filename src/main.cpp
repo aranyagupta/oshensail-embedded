@@ -3,6 +3,7 @@
 #include "trac.hpp"
 #include "preprocess.hpp"
 #include <EloquentTinyML.h>
+#include <STM32FreeRTOS.h>
 #include "network_tflite_data.h"
 #include "network_config.h"
 
@@ -27,7 +28,10 @@ EthernetClient client;                 // TCP/IP Client for reading TracIO Data
 char tracIOBuffer[TCP_BUFFER_LENGTH];  // Buffer to read client device TracIO data
 EthernetUDP tracStreamServer;          // TracStream client for UDP communication
 char liveData[LIVE_DATA_LENGTH];       // structure holding raw hydrophone data for one packet
-char longStore[LONG_STORE_LENGTH];     // structure holding hydrophone data over several packets
+char longStore0[LONG_STORE_LENGTH];     // structure holding hydrophone data over several packets - 1st half of double buffer
+char longStore1[LONG_STORE_LENGTH];     // structure holding hydrophone data over several packets - 2nd half of double buffer
+char (*lS0ptr)[LONG_STORE_LENGTH] = &longStore0; //pointers to each side of double buffer
+char (*lS1ptr)[LONG_STORE_LENGTH] = &longStore1;
 uint16_t seqTracker(0);
 
 const uint32_t dataSize = LONG_STORE_LENGTH / 3; // Total number of samples in longStore
@@ -39,6 +43,11 @@ uint32_t current; // timing
 
 float inferenceResult;
 Eloquent::TinyML::TfLite<NUM_INPUTS, NUM_OUTPUTS, TENSOR_ARENA_SIZE> tf;
+
+TaskHandle_t ethernetHandle = NULL;
+TaskHandle_t preprocessInferenceHandle = NULL;
+SemaphoreHandle_t longStore0Mutex;
+SemaphoreHandle_t longStore1Mutex;
 
 
 void test_setup()
@@ -52,7 +61,7 @@ void test_setup()
             int ioffset = i * 192;
             for (int j = 0; j < 192; j++)
             {
-                longStore[j + ioffset + koffset] = base[j];
+                longStore0[j + ioffset + koffset] = base[j];
             }
         }
     }
@@ -96,6 +105,109 @@ void scaleIntMags(int32_t* magnitudes){
     }
 }
 
+//ethernet comms task for multithreading
+void ethernetTask(void * pvParameters){
+    #ifdef DEPLOY // Deploying full communication stream
+
+        bool ethernetTaskBufSide = *(bool *)pvParameters;
+        char (*longStorePtr)[LONG_STORE_LENGTH];
+
+        while(1){
+            if(ethernetTaskBufSide == 0){
+                xSemaphoreTake(longStore0Mutex, portMAX_DELAY);
+                longStorePtr = lS0ptr;
+            }else{
+                xSemaphoreTake(longStore1Mutex, portMAX_DELAY);
+                longStorePtr = lS1ptr;
+            }
+
+            receiveDatagram(tracStreamServer, liveData);
+            tracStatus status = parseDatagram(liveData, *longStorePtr);
+            if (status == FINISH){
+                //Do  nothing, preprocessing task will take over
+            } 
+            else if (status==INVALID){
+                //set this side of double buffer to 0s
+                memset(*longStorePtr, 0, sizeof *longStorePtr);
+            }
+            memset(liveData, 0, sizeof liveData);
+
+            /* Handle TCP Communication (TracIO) */
+
+            // Read TracIO data from client into buffer if available
+            uint16_t size = client.available();
+            client.readBytes(tracIOBuffer, size);
+
+            // Decode tracIO buffer - if okay, respond with same thing
+            if (decodeTracIO(tracIOBuffer) == OK)
+            {
+                tracIOServer.write(tracIOBuffer, size);
+            }
+
+            //at the end of ethernet read cycle, 
+            //  -> switch the ptr for this task to process other side of double buffer
+            //  -> give up the mutex to this side of double buffer
+            if(ethernetTaskBufSide == 0){
+                ethernetTaskBufSide = 1;
+                longStorePtr = lS1ptr;
+                xSemaphoreGive(longStore0Mutex);
+            }else{
+                ethernetTaskBufSide = 0;
+                longStorePtr = lS0ptr;
+                xSemaphoreGive(longStore1Mutex);
+            }
+        }
+    #endif
+}
+
+//prepreprocessing and inference task for multithreading
+void preprocessInferenceTask(void * pvParameters){
+    #ifdef DEPLOY // Deploying full communication stream
+
+        bool preprocInferenceTaskBufSide = *(bool *)pvParameters;
+        char (*longStorePtr)[LONG_STORE_LENGTH];
+
+        while(1){
+            if(preprocInferenceTaskBufSide == 0){
+                xSemaphoreTake(longStore0Mutex, portMAX_DELAY);
+                longStorePtr = lS0ptr;
+            }else{
+                xSemaphoreTake(longStore1Mutex, portMAX_DELAY);
+                longStorePtr = lS1ptr;
+            }
+
+            preprocess(*longStorePtr, dataSize, magnitudes, iters);
+                #ifdef AI_DEPLOY
+                    intToFloatMags(magnitudes, magFloats);
+                    normaliseFloatMags(magFloats);
+                    inferenceResult = tf.predict(magFloats);
+                    if (inferenceResult>THRESHOLD) {
+                        Serial.println("EVENT DETECTED");
+                    }
+                #endif // AI_DEPLOY
+                #ifdef TREE_DEPLOY
+                    scaleIntMags(magnitudes);
+                    intToFloatMags(magnitudes);
+                    int32_t predicted_class = dt_predict(magFloats, FRAME_SIZE/2*NUM_FRAMES);
+                    if (predicted_class){
+                        Serial.println("EVENT DETECTED");
+                    }
+                #endif // TREE_DEPLOY
+            
+            memset(*longStorePtr, 0, sizeof *longStorePtr);
+
+            if(preprocInferenceTaskBufSide == 0){
+                preprocInferenceTaskBufSide = 1;
+                longStorePtr = lS1ptr;
+                xSemaphoreGive(longStore0Mutex);
+            }else{
+                preprocInferenceTaskBufSide = 0;
+                longStorePtr = lS0ptr;
+                xSemaphoreGive(longStore1Mutex);
+            }
+        }
+    #endif
+}
 
 void setup()
 {
@@ -103,73 +215,101 @@ void setup()
     Serial.begin(BAUD_RATE);
     Serial.println("START SETUP");
 
+    //create mutex for double buffer usage 
+    //SemaphoreHandle_t longStore1Mutex;    //NOT SURE MUTEX IS STRICTLY NECESSARY
+    longStore0Mutex = xSemaphoreCreateMutex();
+    longStore1Mutex = xSemaphoreCreateMutex();
+
+    bool ethernetTaskBufSide = 0;
+    bool preprocInferenceTaskBufSide = 1;
+
+    xTaskCreate(
+        ethernetTask,                       /* Function that implements the task */
+        "ethernet",                         /* Text name for the task */
+        64,                                 /* Stack size in words, not bytes */ //CHANGE STACK SIZE TO MAKE SURE NOT OVERFLOWING 
+        &ethernetTaskBufSide,               /* Parameter passed into the task */
+        1,	                                /* Task priority */
+        &ethernetHandle                     /* Pointer to store the task handle */
+    );
+
+    xTaskCreate(
+        preprocessInferenceTask,            /* Function that implements the task */
+        "preprocess+inference",             /* Text name for the task */
+        64,                                 /* Stack size in words, not bytes */ //CHANGE STACK SIZE TO MAKE SURE NOT OVERFLOWING 
+        &preprocInferenceTaskBufSide,            /* Parameter passed into the task */
+        1,	                                /* Task priority */
+        &preprocessInferenceHandle          /* Pointer to store the task handle */
+    );
+
     /* Register event handlers for error, match,j and event */
 
-#ifdef DEPLOY
-    /* Setup Ethernet communication and ensure client is available */
-    Ethernet.begin(mac, ip);
-    while (Ethernet.linkStatus() == LinkOFF)
-    {
-        Serial.println("Ethernet cable is not connected.");
-        delay(100);
-    }
+    #ifdef DEPLOY
+        /* Setup Ethernet communication and ensure client is available */
+        Ethernet.begin(mac, ip);
+        while (Ethernet.linkStatus() == LinkOFF)
+        {
+            Serial.println("Ethernet cable is not connected.");
+            delay(100);
+        }
 
-    tracIOServer.begin();
-    tracStreamServer.begin(UDP_PORT);
-    
-    client.setConnectionTimeout(0xFFFF);
+        tracIOServer.begin();
+        tracStreamServer.begin(UDP_PORT);
+        
+        client.setConnectionTimeout(0xFFFF);
 
-    // Begin tf instance with model data
-    tf.begin(g_tflm_network_model_data);
+        // Begin tf instance with model data
+        tf.begin(g_tflm_network_model_data);
 
-#endif
+    #endif
 
-#ifndef DEPLOY
+    #ifndef DEPLOY
 
-#ifdef PREPROCESS_TEST
-    Serial.println("Starting to setup test");
-    test_setup();
-    // for (int i=0; i<LONG_STORE_LENGTH; i++){
-    //     Serial.println((uint8_t)longStore[i]);
-    // }
-    Serial.println("Finished setting up test");
-#endif // PREPROCESS_TEST
+    #ifdef PREPROCESS_TEST
+        Serial.println("Starting to setup test");
+        test_setup();
+        // for (int i=0; i<LONG_STORE_LENGTH; i++){
+        //     Serial.println((uint8_t)longStore[i]);
+        // }
+        Serial.println("Finished setting up test");
+    #endif // PREPROCESS_TEST
 
-#ifdef ETHERNET_TEST
+    #ifdef ETHERNET_TEST
 
-    Ethernet.begin(mac, ip);
-    Serial.println("BEGAN ETHERNET");
+        Ethernet.begin(mac, ip);
+        Serial.println("BEGAN ETHERNET");
 
-    while (Ethernet.linkStatus() == LinkOFF)
-    {
-        Serial.println("Ethernet cable is not connected.");
-        delay(1000);
-    }
-    Serial.println("LINK OK");
+        while (Ethernet.linkStatus() == LinkOFF)
+        {
+            Serial.println("Ethernet cable is not connected.");
+            delay(1000);
+        }
+        Serial.println("LINK OK");
 
-    tracIOServer.begin();
-    Serial.println("BEGAN tracIO");
-    tracStreamServer.begin(UDP_PORT);
-    Serial.println("BEGAN tracStream");
-    // do
-    // {
-    //     delay(500);
-    //     client = tracIOServer.available();
-    // } while (!client.connected());
-    Serial.println("GOT CLIENT");
-    client.setConnectionTimeout(0xFFFF);
-#endif // ETHERNET_TEST
+        tracIOServer.begin();
+        Serial.println("BEGAN tracIO");
+        tracStreamServer.begin(UDP_PORT);
+        Serial.println("BEGAN tracStream");
+        // do
+        // {
+        //     delay(500);
+        //     client = tracIOServer.available();
+        // } while (!client.connected());
+        Serial.println("GOT CLIENT");
+        client.setConnectionTimeout(0xFFFF);
+    #endif // ETHERNET_TEST
 
-#ifdef AI_TEST
-    // Handle ai_input/output
-    tf.begin(g_tflm_network_model_data);
+    #ifdef AI_TEST
+        // Handle ai_input/output
+        tf.begin(g_tflm_network_model_data);
 
-#endif
+    #endif
 
-#endif // DEPLOY
+    #endif // DEPLOY
 
-    Serial.println("Finish setup");
-    current = micros();
+        Serial.println("Finish setup");
+        current = micros();
+
+    vTaskStartScheduler();
 
 }
 
@@ -179,48 +319,6 @@ void setup()
 
 void loop()
 {
-
-#ifdef DEPLOY // Deploying full communication stream
-    receiveDatagram(tracStreamServer, liveData);
-    tracStatus status = parseDatagram(liveData, longStore);
-    if (status == FINISH)
-    {
-        preprocess(longStore, dataSize, magnitudes, iters);
-    #ifdef AI_DEPLOY
-        intToFloatMags(magnitudes, magFloats);
-        normaliseFloatMags(magFloats);
-        inferenceResult = tf.predict(magFloats);
-        if (inferenceResult>THRESHOLD) {
-            Serial.println("EVENT DETECTED");
-        }
-    #endif // AI_DEPLOY
-    #ifdef TREE_DEPLOY
-        scaleIntMags(magnitudes);
-        intToFloatMags(magnitudes);
-        int32_t predicted_class = dt_predict(magFloats, FRAME_SIZE/2*NUM_FRAMES);
-        if (predicted_class){
-            Serial.println("EVENT DETECTED");
-        }
-    #endif // TREE_DEPLOY
-        memset(longStore, 0, sizeof longStore);
-    }
-    else if (status==INVALID){
-        memset(longStore, 0, sizeof longStore);
-    }
-    memset(liveData, 0, sizeof liveData);
-
-    /* Handle TCP Communication (TracIO) */
-
-    // Read TracIO data from client into buffer if available
-    uint16_t size = client.available();
-    client.readBytes(tracIOBuffer, size);
-
-    // Decode tracIO buffer - if okay, respond with same thing
-    if (decodeTracIO(tracIOBuffer) == OK)
-    {
-        tracIOServer.write(tracIOBuffer, size);
-    }
-#endif
 
 #ifndef DEPLOY // Timing/testing system
 #ifdef PREPROCESS_TEST
