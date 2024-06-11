@@ -69,12 +69,41 @@ inline void hammingWindowing(char* longStore, uint32_t dataSize){
   }
 }
 
+// convert 2d coord (e.g. 0, 0) to 1d index e.g. 0
+inline static uint16_t coord2dToIndex(uint16_t x, uint16_t y, uint16_t numColumns){
+  return y*numColumns + x;
+}
+
+// Perform max pool on 1d array representing 2d spectrogram
+// Prior size: 513x94
+// New size: 171x31
+void maxPool(int32_t* magnitudes, int32_t* pooledMags){
+  for (uint16_t row=1; row<NUM_ROWS-1; row+=POOL_STRIDE){
+    for (uint16_t col=1; col<NUM_COLUMNS-1; col+=POOL_STRIDE){
+      // Row is y coordinate, column is x coordinate
+      int32_t max = magnitudes[coord2dToIndex(row, col, NUM_COLUMNS)];
+      
+      for (uint16_t offsetX=-POOL_SIZE/2; offsetX<POOL_SIZE/2+1; offsetX++){
+        for (uint16_t offsetY=-POOL_SIZE/2; offsetY<POOL_SIZE/2+1; offsetY++){
+          int32_t val = magnitudes[coord2dToIndex(row+offsetX, col+offsetY, NUM_COLUMNS)];
+          max = (val>max) ? val : max; 
+        }
+      }
+
+      uint16_t newRow = row/POOL_SIZE;
+      uint16_t newCol = col/POOL_SIZE;
+      pooledMags[coord2dToIndex(newCol, newRow, POOLED_NUM_COLUMNS)] = max;
+    }
+  }
+}
+
+
 
 // Preprocesses data into magnitudes 
 // longStore is the raw bytes data taken from hydrophone
 // dataSize is the number of SAMPLES on the hydrophone, NOT the number of bytes
 // cepstrumCoeffs is an (empty) buffer into which coeffs will be placed
-void preprocess(char* longStore, uint32_t dataSize, int32_t* magnitudes, const uint32_t iters){
+void preprocess(char* longStore, uint32_t dataSize, int32_t* magnitudes, int32_t* pooledMags, const uint32_t iters){
   
   preEmphasis(longStore, dataSize);
   // Serial.println("Finish Pre-emphasis");
@@ -89,9 +118,18 @@ void preprocess(char* longStore, uint32_t dataSize, int32_t* magnitudes, const u
     // stores one frame's worth of frequencies and magnitudes at a time. each frame contains 1024 samples*3 bytes of data
     // store into temporary area to avoid memory overwriting errors
     Approx_FFT(longStore+i*HOP_LENGTH*3, FRAME_SIZE, SAMPLE_RATE, temp_mag, temp_freq);
-    memcpy(magnitudes+i*(FRAME_SIZE/2+1), temp_mag, (FRAME_SIZE/2+1)*4); // 4 bytes per int
+    // memcpy(magnitudes+i*(FRAME_SIZE/2+1), temp_mag, (FRAME_SIZE/2+1)*4); // 4 bytes per int
+
+    /* memcpy stores as [FFT at t=0, FFT at t=1, ...] shape 94x513
+      Code below stores as flattened spectrogram [48kHz magnitudes across all times, 46kHz magnitudes at all times, ...] shape 513x94      
+    */
+    for (uint16_t j=0; j<FRAME_SIZE/2+1; j++){
+      magnitudes[NUM_COLUMNS*j+i] = temp_mag[FRAME_SIZE/2+1-j]; 
+    }
   }
 
-  // TODO: normalisation of magnitudes
-  
+  // Perform max pooling 3x3, no padding, no dilation, stride 3
+  #if defined(TREE_TEST) || defined(TREE_DEPLOY)
+  maxPool(magnitudes, pooledMags);
+  #endif
 }

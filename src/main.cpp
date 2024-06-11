@@ -6,18 +6,8 @@
 #include "network_tflite_data.h"
 #include "network_config.h"
 
-#define DEPLOY
-#define AI_DEPLOY
-// #define TREE_DEPLOY
 
-// #define PREPROCESS_TEST
-// #define ETHERNET_TEST
-// #define AI_TEST
-// #define TREE_TEST
-
-
-
-#include "decision_tree_68_int32.h"
+#include "random_forest_85_float32.h"
 
 // Ethernet information/setup variables
 uint8_t mac[] = {0x00, 0xAA, 0xBB, 0xCC, 0xDA, 0x02};
@@ -33,7 +23,19 @@ uint16_t seqTracker(0);
 const uint32_t dataSize = LONG_STORE_LENGTH / 3; // Total number of samples in longStore
 const uint32_t iters = dataSize / HOP_LENGTH; // Number of individual FFTs we need to store
 int32_t magnitudes[MAG_LENGTH]; // spectrogram developed out of raw audio data
-float magFloats[MAG_LENGTH]; // cast to float array
+int32_t pooledMags[POOLED_MAG_LENGTH]; // pooled magnitudes length
+#if defined(TREE_TEST) || defined(TREE_DEPLOY) || defined(PREPROCESS_TEST)
+float magFloats[POOLED_MAG_LENGTH]; // cast to float array
+#endif
+#if defined(AI_TEST) || defined(AI_DEPLOY) 
+float magFloats[MAG_LENGTH];
+#endif
+/* 
+    ENSURE magFloats LENGTH IS THE CORRECT LENGTH FOR THE CORRECT TASK 
+    FOR DECISION TREE - POOLED_MAG_LENGTH
+    FOR NN - MAG_LENGTH
+*/ 
+
 
 uint32_t current; // timing
 
@@ -58,26 +60,31 @@ void test_setup()
     }
 }
 
-void intToFloatMags(int32_t* intMags, float* floatMags){
-    for (int i=0; i<MAG_LENGTH; i++){
+// cast integer to float
+// helper because spectrogram from fft is in ints but we need floats for NN/DT
+void intToFloatMags(int32_t* intMags, float* floatMags, uint16_t length){
+    for (int i=0; i<length; i++){
         floatMags[i]= (float) intMags[i];
         if (floatMags[i]<0) floatMags[i] = 0;
     }
 }
 
-void normaliseFloatMags(float* floatMags){
+// normalise magnitudes to between 0 and 1
+void normaliseFloatMags(float* floatMags, uint16_t length){
     float max = floatMags[0];
-    for (uint16_t i=1; i<MAG_LENGTH; i++){
+    for (uint16_t i=1; i<length; i++){
         if (floatMags[i]>max) {
             max = floatMags[i];
         }
     }
 
-    for (uint16_t i=0; i<MAG_LENGTH; i++){
+    for (uint16_t i=0; i<length; i++){
         floatMags[i] = floatMags[i]/max;
     }
 }
 
+// scale integers between 0 and 0x7fffffff
+// not currently used as DT takes in normalised values, not scaled values
 void scaleIntMags(int32_t* magnitudes){
     float max = (float) magnitudes[0];
     float min = (float) magnitudes[0];
@@ -120,7 +127,9 @@ void setup()
     client.setConnectionTimeout(0xFFFF);
 
     // Begin tf instance with model data
+    #if defined(AI_DEPLOY) || defined(AI_TEST)
     tf.begin(g_tflm_network_model_data);
+    #endif // AI_DEPLOY || AI_TEST
 
 #endif
 
@@ -164,7 +173,7 @@ void setup()
     // Handle ai_input/output
     tf.begin(g_tflm_network_model_data);
 
-#endif
+#endif // AI_TEST
 
 #endif // DEPLOY
 
@@ -185,19 +194,19 @@ void loop()
     tracStatus status = parseDatagram(liveData, longStore);
     if (status == FINISH)
     {
-        preprocess(longStore, dataSize, magnitudes, iters);
+        preprocess(longStore, dataSize, magnitudes, pooledMags, iters);
     #ifdef AI_DEPLOY
-        intToFloatMags(magnitudes, magFloats);
-        normaliseFloatMags(magFloats);
+        intToFloatMags(magnitudes, magFloats, MAG_LENGTH);
+        normaliseFloatMags(magFloats, MAG_LENGTH);
         inferenceResult = tf.predict(magFloats);
         if (inferenceResult>THRESHOLD) {
             Serial.println("EVENT DETECTED");
         }
     #endif // AI_DEPLOY
     #ifdef TREE_DEPLOY
-        scaleIntMags(magnitudes);
-        intToFloatMags(magnitudes);
-        int32_t predicted_class = dt_predict(magFloats, FRAME_SIZE/2*NUM_FRAMES);
+        intToFloatMags(magnitudes, magFloats, POOLED_MAG_LENGTH);
+        normaliseFloatMags(magFloats, POOLED_MAG_LENGTH);
+        int32_t predicted_class = dt_predict(magFloats, POOLED_MAG_LENGTH);
         if (predicted_class){
             Serial.println("EVENT DETECTED");
         }
@@ -226,12 +235,9 @@ void loop()
 #ifdef PREPROCESS_TEST
 
     uint32_t current = millis();
-    preprocess(longStore, dataSize, magnitudes, iters);
-    Serial.println("HERE");
-    intToFloatMags(magnitudes, magFloats);
-    Serial.println("HERE 2");
-    normaliseFloatMags(magFloats);
-    Serial.println("HERE 3");
+    preprocess(longStore, dataSize, magnitudes, pooledMags, iters);
+    intToFloatMags(pooledMags, magFloats, POOLED_MAG_LENGTH);
+    normaliseFloatMags(magFloats, POOLED_MAG_LENGTH);
     
     Serial.print(millis() - current);
     Serial.println(" ms to End");
@@ -311,8 +317,9 @@ void loop()
 
 #ifdef AI_TEST
     test_setup();
-    preprocess(longStore, dataSize, magnitudes, iters);
-    intToFloatMags(magnitudes, magFloats);
+    preprocess(longStore, dataSize, magnitudes, pooledMags, iters);
+    intToFloatMags(magnitudes, magFloats, MAG_LENGTH);
+    normaliseFloatMags(magFloats, MAG_LENGTH);
 
     uint32_t current = micros();
     inferenceResult = tf.predict(magFloats);
@@ -326,10 +333,12 @@ void loop()
 
 #ifdef TREE_TEST
     test_setup();
-    preprocess(longStore, dataSize, magnitudes, iters);
-    intToFloatMags(magnitudes, magFloats);
+    preprocess(longStore, dataSize, magnitudes, pooledMags, iters);
+    intToFloatMags(pooledMags, magFloats, POOLED_MAG_LENGTH);
+    normaliseFloatMags(magFloats, POOLED_MAG_LENGTH);
+
     uint32_t current = micros();
-    const int32_t predicted_class = dt_predict(magFloats, FRAME_SIZE/2*NUM_FRAMES);
+    const int32_t predicted_class = dt_predict(magFloats, POOLED_MAG_LENGTH);
     uint32_t now = micros();
     Serial.print("TIME (us): ");
     Serial.println(now-current);

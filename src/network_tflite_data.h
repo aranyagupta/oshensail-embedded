@@ -7,7 +7,9 @@
 #define __NETWORK_TFLITE_DATA_H__
 
 #include <stdint.h>
+#include "config.hpp"
 
+#if  defined(AI_DEPLOY) || defined(AI_TEST) 
 #ifdef __cplusplus
 extern "C"
 {
@@ -30,3 +32,4 @@ extern const int g_tflm_network_model_data_len;
 }
 #endif
 #endif /* __NETWORK_TFLITE_DATA_H__ */
+#endif // AI_DEPLOY || AI_TEST
