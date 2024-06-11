@@ -52,6 +52,7 @@ inline void preEmphasis(char* longStore, uint32_t dataSize){
 }
 
 // Apply a hamming window to each frame 
+// Again, dataSize is number of SAMPLES, not number of bytes
 inline void hammingWindowing(char* longStore, uint32_t dataSize){
   // Multiply signal frames by hamming window w(n, a) = (1-a) - acos(2*pi*n/(N-1)) for n = 0...N-1 
   // a = 0.46
@@ -106,18 +107,20 @@ void maxPool(int32_t* magnitudes, int32_t* pooledMags){
 void preprocess(char* longStore, uint32_t dataSize, int32_t* magnitudes, int32_t* pooledMags, const uint32_t iters){
   
   preEmphasis(longStore, dataSize);
-  // Serial.println("Finish Pre-emphasis");
-  hammingWindowing(longStore, dataSize);
-  // Serial.println("Finish Hamming Windowing");
-  
+
+  char temp_frame[FRAME_SIZE*3];
   int32_t temp_mag[FRAME_SIZE]; 
   int32_t temp_freq[FRAME_SIZE];
 
   // perform fft on each hamming windowed frame of length 1024
   for (uint16_t i=0; i<iters; i++){
+    // Applies hamming windowing to one frame at a time, due to overlap between frames when hop length<frame size
+    memcpy(temp_frame, longStore+i*HOP_LENGTH*3, FRAME_SIZE*3);
+    hammingWindowing(temp_frame, FRAME_SIZE);
+    
     // stores one frame's worth of frequencies and magnitudes at a time. each frame contains 1024 samples*3 bytes of data
-    // store into temporary area to avoid memory overwriting errors
-    Approx_FFT(longStore+i*HOP_LENGTH*3, FRAME_SIZE, SAMPLE_RATE, temp_mag, temp_freq);
+    Approx_FFT(temp_frame, FRAME_SIZE, SAMPLE_RATE, temp_mag, temp_freq);
+    
     // memcpy(magnitudes+i*(FRAME_SIZE/2+1), temp_mag, (FRAME_SIZE/2+1)*4); // 4 bytes per int
 
     /* memcpy stores as [FFT at t=0, FFT at t=1, ...] shape 94x513
