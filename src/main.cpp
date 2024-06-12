@@ -18,11 +18,23 @@ EthernetClient client;                 // TCP/IP Client for reading TracIO Data
 char tracIOBuffer[TCP_BUFFER_LENGTH];  // Buffer to read client device TracIO data
 EthernetUDP tracStreamServer;          // TracStream client for UDP communication
 char liveData[LIVE_DATA_LENGTH];       // structure holding raw hydrophone data for one packet
+#ifndef MULTITHREAD
+char longStore[LONG_STORE_LENGTH];     // structure holding hydrophone data over several packets
+#endif
+
+uint16_t seqTracker(0);
+
+#ifdef MULTITHREAD 
+TaskHandle_t ethernetHandle = NULL;             //task and mutex handles for multithread
+TaskHandle_t preprocessInferenceHandle = NULL;
+SemaphoreHandle_t longStore0Mutex;
+SemaphoreHandle_t longStore1Mutex;
+
 char longStore0[LONG_STORE_LENGTH];     // structure holding hydrophone data over several packets - 1st half of double buffer
 char longStore1[LONG_STORE_LENGTH];     // structure holding hydrophone data over several packets - 2nd half of double buffer
 char (*lS0ptr)[LONG_STORE_LENGTH] = &longStore0; //pointers to each side of double buffer
 char (*lS1ptr)[LONG_STORE_LENGTH] = &longStore1;
-uint16_t seqTracker(0);
+#endif
 
 const uint32_t dataSize = LONG_STORE_LENGTH / 3; // Total number of samples in longStore
 const uint32_t iters = dataSize / HOP_LENGTH; // Number of individual FFTs we need to store
@@ -44,13 +56,16 @@ float magFloats[MAG_LENGTH];
 uint32_t current; // timing
 
 float inferenceResult;
+#if defined(AI_TEST) || defined(AI_DEPLOY)
 Eloquent::TinyML::TfLite<NUM_INPUTS, NUM_OUTPUTS, TENSOR_ARENA_SIZE> tf;
+#endif
 
+#ifdef MULTITHREAD
 TaskHandle_t ethernetHandle = NULL;
 TaskHandle_t preprocessInferenceHandle = NULL;
 SemaphoreHandle_t longStore0Mutex;
 SemaphoreHandle_t longStore1Mutex;
-
+#endif
 
 void test_setup()
 {
@@ -63,7 +78,12 @@ void test_setup()
             int ioffset = i * 192;
             for (int j = 0; j < 192; j++)
             {
-                longStore0[j + ioffset + koffset] = base[j];
+                #ifdef MULTITHREAD
+                    longStore0[j + ioffset + koffset] = base[j];
+                #endif
+                #ifndef MULTITHREAD
+                    longStore[j + ioffset + koffset] = base[j];
+                #endif
             }
         }
     }
@@ -112,109 +132,218 @@ void scaleIntMags(int32_t* magnitudes){
     }
 }
 
-//ethernet comms task for multithreading
-void ethernetTask(void * pvParameters){
-    #ifdef DEPLOY // Deploying full communication stream
+#ifdef MULTITHREAD
+    //ethernet comms task for multithreading
+    void ethernetTask(void * pvParameters){
+        #ifdef DEPLOY // Deploying full communication stream
 
-        bool ethernetTaskBufSide = *(bool *)pvParameters;
-        char (*longStorePtr)[LONG_STORE_LENGTH];
+            bool ethernetTaskBufSide = *(bool *)pvParameters;
+            char (*longStorePtr)[LONG_STORE_LENGTH];
 
-        while(1){
-            if(ethernetTaskBufSide == 0){
-                xSemaphoreTake(longStore0Mutex, portMAX_DELAY);
-                longStorePtr = lS0ptr;
-            }else{
-                xSemaphoreTake(longStore1Mutex, portMAX_DELAY);
-                longStorePtr = lS1ptr;
+            while(1){
+                if(ethernetTaskBufSide == 0){
+                    xSemaphoreTake(longStore0Mutex, portMAX_DELAY);
+                    longStorePtr = lS0ptr;
+                }else{
+                    xSemaphoreTake(longStore1Mutex, portMAX_DELAY);
+                    longStorePtr = lS1ptr;
+                }
+
+                receiveDatagram(tracStreamServer, liveData);
+                tracStatus status = parseDatagram(liveData, *longStorePtr);
+                if (status == FINISH){
+                    //Do  nothing, preprocessing task will take over
+                } 
+                else if (status==INVALID){
+                    //set this side of double buffer to 0s
+                    memset(*longStorePtr, 0, sizeof *longStorePtr);
+                }
+                memset(liveData, 0, sizeof liveData);
+
+                /* Handle TCP Communication (TracIO) */
+
+                // Read TracIO data from client into buffer if available
+                uint16_t size = client.available();
+                client.readBytes(tracIOBuffer, size);
+
+                // Decode tracIO buffer - if okay, respond with same thing
+                if (decodeTracIO(tracIOBuffer) == OK)
+                {
+                    tracIOServer.write(tracIOBuffer, size);
+                }
+
+                //at the end of ethernet read cycle, 
+                //  -> switch the ptr for this task to process other side of double buffer
+                //  -> give up the mutex to this side of double buffer
+                if(ethernetTaskBufSide == 0){
+                    ethernetTaskBufSide = 1;
+                    longStorePtr = lS1ptr;
+                    xSemaphoreGive(longStore0Mutex);
+                }else{
+                    ethernetTaskBufSide = 0;
+                    longStorePtr = lS0ptr;
+                    xSemaphoreGive(longStore1Mutex);
+                }
             }
+        #endif
+    }
 
-            receiveDatagram(tracStreamServer, liveData);
-            tracStatus status = parseDatagram(liveData, *longStorePtr);
-            if (status == FINISH){
-                //Do  nothing, preprocessing task will take over
-            } 
-            else if (status==INVALID){
-                //set this side of double buffer to 0s
+    //prepreprocessing and inference task for multithreading
+    void preprocessInferenceTask(void * pvParameters){
+        #ifdef DEPLOY // Deploying full communication stream
+
+            bool preprocInferenceTaskBufSide = *(bool *)pvParameters;
+            char (*longStorePtr)[LONG_STORE_LENGTH];
+
+            while(1){
+                if(preprocInferenceTaskBufSide == 0){
+                    xSemaphoreTake(longStore0Mutex, portMAX_DELAY);
+                    longStorePtr = lS0ptr;
+                }else{
+                    xSemaphoreTake(longStore1Mutex, portMAX_DELAY);
+                    longStorePtr = lS1ptr;
+                }
+
+                preprocess(*longStorePtr, dataSize, magnitudes, iters);
+                    #ifdef AI_DEPLOY
+                        intToFloatMags(magnitudes, magFloats);
+                        normaliseFloatMags(magFloats);
+                        inferenceResult = tf.predict(magFloats);
+                        if (inferenceResult>THRESHOLD) {
+                            Serial.println("EVENT DETECTED");
+                        }
+                    #endif // AI_DEPLOY
+                    #ifdef TREE_DEPLOY
+                        intToFloatMags(magnitudes, magFloats, POOLED_MAG_LENGTH);
+                        normaliseFloatMags(magFloats, POOLED_MAG_LENGTH);
+                        int32_t predicted_class = dt_predict(magFloats, POOLED_MAG_LENGTH);
+                        if (predicted_class){
+                            Serial.println("EVENT DETECTED");
+                        }
+                    #endif // TREE_DEPLOY
+                
                 memset(*longStorePtr, 0, sizeof *longStorePtr);
+
+                if(preprocInferenceTaskBufSide == 0){
+                    preprocInferenceTaskBufSide = 1;
+                    longStorePtr = lS1ptr;
+                    xSemaphoreGive(longStore0Mutex);
+                }else{
+                    preprocInferenceTaskBufSide = 0;
+                    longStorePtr = lS0ptr;
+                    xSemaphoreGive(longStore1Mutex);
+                }
             }
-            memset(liveData, 0, sizeof liveData);
+        #endif
+    }
+#endif
 
-            /* Handle TCP Communication (TracIO) */
+#ifdef MULTITHREAD
+    //ethernet comms task for multithreading
+    void ethernetTask(void * pvParameters){
+        #ifdef DEPLOY // Deploying full communication stream
 
-            // Read TracIO data from client into buffer if available
-            uint16_t size = client.available();
-            client.readBytes(tracIOBuffer, size);
+            bool ethernetTaskBufSide = *(bool *)pvParameters;
+            char (*longStorePtr)[LONG_STORE_LENGTH];
 
-            // Decode tracIO buffer - if okay, respond with same thing
-            if (decodeTracIO(tracIOBuffer) == OK)
-            {
-                tracIOServer.write(tracIOBuffer, size);
+            while(1){
+                if(ethernetTaskBufSide == 0){
+                    xSemaphoreTake(longStore0Mutex, portMAX_DELAY);
+                    longStorePtr = lS0ptr;
+                }else{
+                    xSemaphoreTake(longStore1Mutex, portMAX_DELAY);
+                    longStorePtr = lS1ptr;
+                }
+
+                receiveDatagram(tracStreamServer, liveData);
+                tracStatus status = parseDatagram(liveData, *longStorePtr);
+                if (status == FINISH){
+                    //Do  nothing, preprocessing task will take over
+                } 
+                else if (status==INVALID){
+                    //set this side of double buffer to 0s
+                    memset(*longStorePtr, 0, sizeof *longStorePtr);
+                }
+                memset(liveData, 0, sizeof liveData);
+
+                /* Handle TCP Communication (TracIO) */
+
+                // Read TracIO data from client into buffer if available
+                uint16_t size = client.available();
+                client.readBytes(tracIOBuffer, size);
+
+                // Decode tracIO buffer - if okay, respond with same thing
+                if (decodeTracIO(tracIOBuffer) == OK)
+                {
+                    tracIOServer.write(tracIOBuffer, size);
+                }
+
+                //at the end of ethernet read cycle, 
+                //  -> switch the ptr for this task to process other side of double buffer
+                //  -> give up the mutex to this side of double buffer
+                if(ethernetTaskBufSide == 0){
+                    ethernetTaskBufSide = 1;
+                    longStorePtr = lS1ptr;
+                    xSemaphoreGive(longStore0Mutex);
+                }else{
+                    ethernetTaskBufSide = 0;
+                    longStorePtr = lS0ptr;
+                    xSemaphoreGive(longStore1Mutex);
+                }
             }
+        #endif
+    }
 
-            //at the end of ethernet read cycle, 
-            //  -> switch the ptr for this task to process other side of double buffer
-            //  -> give up the mutex to this side of double buffer
-            if(ethernetTaskBufSide == 0){
-                ethernetTaskBufSide = 1;
-                longStorePtr = lS1ptr;
-                xSemaphoreGive(longStore0Mutex);
-            }else{
-                ethernetTaskBufSide = 0;
-                longStorePtr = lS0ptr;
-                xSemaphoreGive(longStore1Mutex);
+    //prepreprocessing and inference task for multithreading
+    void preprocessInferenceTask(void * pvParameters){
+        #ifdef DEPLOY // Deploying full communication stream
+
+            bool preprocInferenceTaskBufSide = *(bool *)pvParameters;
+            char (*longStorePtr)[LONG_STORE_LENGTH];
+
+            while(1){
+                if(preprocInferenceTaskBufSide == 0){
+                    xSemaphoreTake(longStore0Mutex, portMAX_DELAY);
+                    longStorePtr = lS0ptr;
+                }else{
+                    xSemaphoreTake(longStore1Mutex, portMAX_DELAY);
+                    longStorePtr = lS1ptr;
+                }
+
+                preprocess(*longStorePtr, dataSize, magnitudes, iters);
+                    #ifdef AI_DEPLOY
+                        intToFloatMags(magnitudes, magFloats);
+                        normaliseFloatMags(magFloats);
+                        inferenceResult = tf.predict(magFloats);
+                        if (inferenceResult>THRESHOLD) {
+                            Serial.println("EVENT DETECTED");
+                        }
+                    #endif // AI_DEPLOY
+                    #ifdef TREE_DEPLOY
+                        intToFloatMags(magnitudes, magFloats, POOLED_MAG_LENGTH);
+                        normaliseFloatMags(magFloats, POOLED_MAG_LENGTH);
+                        int32_t predicted_class = dt_predict(magFloats, POOLED_MAG_LENGTH);
+                        if (predicted_class){
+                            Serial.println("EVENT DETECTED");
+                        }
+                    #endif // TREE_DEPLOY
+                
+                memset(*longStorePtr, 0, sizeof *longStorePtr);
+
+                if(preprocInferenceTaskBufSide == 0){
+                    preprocInferenceTaskBufSide = 1;
+                    longStorePtr = lS1ptr;
+                    xSemaphoreGive(longStore0Mutex);
+                }else{
+                    preprocInferenceTaskBufSide = 0;
+                    longStorePtr = lS0ptr;
+                    xSemaphoreGive(longStore1Mutex);
+                }
             }
-        }
-    #endif
-}
+        #endif
+    }
+#endif
 
-//prepreprocessing and inference task for multithreading
-void preprocessInferenceTask(void * pvParameters){
-    #ifdef DEPLOY // Deploying full communication stream
-
-        bool preprocInferenceTaskBufSide = *(bool *)pvParameters;
-        char (*longStorePtr)[LONG_STORE_LENGTH];
-
-        while(1){
-            if(preprocInferenceTaskBufSide == 0){
-                xSemaphoreTake(longStore0Mutex, portMAX_DELAY);
-                longStorePtr = lS0ptr;
-            }else{
-                xSemaphoreTake(longStore1Mutex, portMAX_DELAY);
-                longStorePtr = lS1ptr;
-            }
-
-            preprocess(*longStorePtr, dataSize, magnitudes, iters);
-                #ifdef AI_DEPLOY
-                    intToFloatMags(magnitudes, magFloats);
-                    normaliseFloatMags(magFloats);
-                    inferenceResult = tf.predict(magFloats);
-                    if (inferenceResult>THRESHOLD) {
-                        Serial.println("EVENT DETECTED");
-                    }
-                #endif // AI_DEPLOY
-                #ifdef TREE_DEPLOY
-                    scaleIntMags(magnitudes);
-                    intToFloatMags(magnitudes);
-                    int32_t predicted_class = dt_predict(magFloats, FRAME_SIZE/2*NUM_FRAMES);
-                    if (predicted_class){
-                        Serial.println("EVENT DETECTED");
-                    }
-                #endif // TREE_DEPLOY
-            
-            memset(*longStorePtr, 0, sizeof *longStorePtr);
-
-            if(preprocInferenceTaskBufSide == 0){
-                preprocInferenceTaskBufSide = 1;
-                longStorePtr = lS1ptr;
-                xSemaphoreGive(longStore0Mutex);
-            }else{
-                preprocInferenceTaskBufSide = 0;
-                longStorePtr = lS0ptr;
-                xSemaphoreGive(longStore1Mutex);
-            }
-        }
-    #endif
-}
 
 void setup()
 {
@@ -222,8 +351,7 @@ void setup()
     Serial.begin(BAUD_RATE);
     Serial.println("START SETUP");
 
-    //create mutex for double buffer usage 
-    //SemaphoreHandle_t longStore1Mutex;    //NOT SURE MUTEX IS STRICTLY NECESSARY
+#ifdef MULTITHREAD
     longStore0Mutex = xSemaphoreCreateMutex();
     longStore1Mutex = xSemaphoreCreateMutex();
 
@@ -247,7 +375,7 @@ void setup()
         1,	                                /* Task priority */
         &preprocessInferenceHandle          /* Pointer to store the task handle */
     );
-
+#endif
     /* Register event handlers for error, match,j and event */
 
     #ifdef DEPLOY
@@ -318,8 +446,9 @@ void setup()
         Serial.println("Finish setup");
         current = micros();
 
+#ifdef MULTITHREAD
     vTaskStartScheduler();
-
+#endif
 }
 
 // TODO: split into two threads
@@ -328,165 +457,166 @@ void setup()
 
 void loop()
 {
+#ifndef MULTITHREAD
+    #ifdef DEPLOY // Deploying full communication stream
+        receiveDatagram(tracStreamServer, liveData);
+        tracStatus status = parseDatagram(liveData, longStore);
+        if (status == FINISH)
+        {
+            preprocess(longStore, dataSize, magnitudes, pooledMags, iters);
+        #ifdef AI_DEPLOY
+            intToFloatMags(magnitudes, magFloats, MAG_LENGTH);
+            normaliseFloatMags(magFloats, MAG_LENGTH);
+            inferenceResult = tf.predict(magFloats);
+            if (inferenceResult>THRESHOLD) {
+                Serial.println("EVENT DETECTED");
+            }
+        #endif // AI_DEPLOY
+        #ifdef TREE_DEPLOY
+            intToFloatMags(magnitudes, magFloats, POOLED_MAG_LENGTH);
+            normaliseFloatMags(magFloats, POOLED_MAG_LENGTH);
+            int32_t predicted_class = dt_predict(magFloats, POOLED_MAG_LENGTH);
+            if (predicted_class){
+                Serial.println("EVENT DETECTED");
+            }
+        #endif // TREE_DEPLOY
+            memset(longStore, 0, sizeof longStore);
+        }
+        else if (status==INVALID){
+            memset(longStore, 0, sizeof longStore);
+        }
+        memset(liveData, 0, sizeof liveData);
 
-#ifdef DEPLOY // Deploying full communication stream
-    receiveDatagram(tracStreamServer, liveData);
-    tracStatus status = parseDatagram(liveData, longStore);
-    if (status == FINISH)
-    {
+        /* Handle TCP Communication (TracIO) */
+
+        // Read TracIO data from client into buffer if available
+        uint16_t size = client.available();
+        client.readBytes(tracIOBuffer, size);
+
+        // Decode tracIO buffer - if okay, respond with same thing
+        if (decodeTracIO(tracIOBuffer) == OK)
+        {
+            tracIOServer.write(tracIOBuffer, size);
+        }
+    #endif
+
+    #ifndef DEPLOY // Timing/testing system
+    #ifdef PREPROCESS_TEST
+
+        uint32_t current = millis();
         preprocess(longStore, dataSize, magnitudes, pooledMags, iters);
-    #ifdef AI_DEPLOY
+        intToFloatMags(pooledMags, magFloats, POOLED_MAG_LENGTH);
+        normaliseFloatMags(magFloats, POOLED_MAG_LENGTH);
+        
+        Serial.print(millis() - current);
+        Serial.println(" ms to End");
+
+        test_setup();
+
+    #endif // PREPROCESS_TEST
+
+    #ifdef ETHERNET_TEST
+
+        
+        receiveDatagram(tracStreamServer, liveData);
+        tracStatus status = parseDatagram(liveData, longStore);
+
+        if (status==FINISH){
+            Serial.print(micros()-current);
+            Serial.println(" us to End");
+            current = micros();
+
+
+            // preprocess(longStore, dataSize, magnitudes, iters);
+            // for (int i=0; i<FRAME_SIZE*NUM_FRAMES; i++){
+            //     int32_t val = (longStore[3*i]<<24)+(longStore[3*i+1]<<16)+(longStore[3*i+2]<<8);
+            //     Serial.println(val);
+            // }
+            // int32_t max0 = 0;
+            // int32_t max0mag = 0;
+            // int32_t max1 = 0;
+            // int32_t max1mag = 0;
+            // int32_t max2 = 0;
+            // int32_t max2mag = 0;
+            // int32_t max3 = 0;
+            // int32_t max3mag = 0;
+            // int32_t max4 = 0;
+            // int32_t max4mag = 0;
+
+            // for (int i=0; i<FRAME_SIZE/2*NUM_FRAMES; i++){
+            //     float frac = (float) i / (float) (FRAME_SIZE/2*NUM_FRAMES);
+            //     float freq = frac * SAMPLE_RATE;
+            //     int32_t mag = magnitudes[i];
+            //     if (mag>max0mag) {
+            //         max0 = freq;
+            //         max0mag = mag;
+            //     }
+            //     else if (mag>max1mag) {
+            //         max1 = freq;
+            //         max1mag = mag;
+            //     }
+            //     else if (mag>max2mag) {
+            //         max2 = freq;
+            //         max2mag = mag;
+            //     }
+            //     else if (mag>max3mag){
+            //          max3 = freq;
+            //          max3mag = mag;
+            //     }
+            //     else if (mag>max4mag) {
+            //         max4 = freq;
+            //         max4mag = mag;
+            //     }
+            // }
+            // Serial.print(max0);
+            // Serial.print(" ");
+            // Serial.print(max1);
+            // Serial.print(" ");
+            // Serial.print(max2);
+            // Serial.print(" ");
+            // Serial.print(max3);
+            // Serial.print(" ");
+            // Serial.println(max4);
+            // memset(longStore, 0, sizeof longStore);
+            // delay(1000);
+        }
+        memset(liveData, 0, sizeof liveData);
+
+    #endif // ETHERNET_TEST
+
+    #ifdef AI_TEST
+        test_setup();
+        preprocess(longStore, dataSize, magnitudes, pooledMags, iters);
         intToFloatMags(magnitudes, magFloats, MAG_LENGTH);
         normaliseFloatMags(magFloats, MAG_LENGTH);
+
+        uint32_t current = micros();
         inferenceResult = tf.predict(magFloats);
-        if (inferenceResult>THRESHOLD) {
-            Serial.println("EVENT DETECTED");
-        }
-    #endif // AI_DEPLOY
-    #ifdef TREE_DEPLOY
-        intToFloatMags(magnitudes, magFloats, POOLED_MAG_LENGTH);
+        uint32_t now = micros();
+        Serial.print("RESULT: ");
+        Serial.println(inferenceResult);
+        Serial.print("TIME (us): ");
+        Serial.println(now-current);
+
+    #endif // AI_TEST
+
+    #ifdef TREE_TEST
+        test_setup();
+        preprocess(longStore, dataSize, magnitudes, pooledMags, iters);
+        intToFloatMags(pooledMags, magFloats, POOLED_MAG_LENGTH);
         normaliseFloatMags(magFloats, POOLED_MAG_LENGTH);
-        int32_t predicted_class = dt_predict(magFloats, POOLED_MAG_LENGTH);
+
+        uint32_t current = micros();
+        const int32_t predicted_class = dt_predict(magFloats, POOLED_MAG_LENGTH);
+        uint32_t now = micros();
+        Serial.print("TIME (us): ");
+        Serial.println(now-current);
         if (predicted_class){
             Serial.println("EVENT DETECTED");
         }
-    #endif // TREE_DEPLOY
-        memset(longStore, 0, sizeof longStore);
-    }
-    else if (status==INVALID){
-        memset(longStore, 0, sizeof longStore);
-    }
-    memset(liveData, 0, sizeof liveData);
 
-    /* Handle TCP Communication (TracIO) */
+    #endif //TREE_TEST
 
-    // Read TracIO data from client into buffer if available
-    uint16_t size = client.available();
-    client.readBytes(tracIOBuffer, size);
-
-    // Decode tracIO buffer - if okay, respond with same thing
-    if (decodeTracIO(tracIOBuffer) == OK)
-    {
-        tracIOServer.write(tracIOBuffer, size);
-    }
-#endif
-
-#ifndef DEPLOY // Timing/testing system
-#ifdef PREPROCESS_TEST
-
-    uint32_t current = millis();
-    preprocess(longStore, dataSize, magnitudes, pooledMags, iters);
-    intToFloatMags(pooledMags, magFloats, POOLED_MAG_LENGTH);
-    normaliseFloatMags(magFloats, POOLED_MAG_LENGTH);
-    
-    Serial.print(millis() - current);
-    Serial.println(" ms to End");
-
-    test_setup();
-
-#endif // PREPROCESS_TEST
-
-#ifdef ETHERNET_TEST
-
-    
-    receiveDatagram(tracStreamServer, liveData);
-    tracStatus status = parseDatagram(liveData, longStore);
-
-    if (status==FINISH){
-        Serial.print(micros()-current);
-        Serial.println(" us to End");
-        current = micros();
-
-
-        // preprocess(longStore, dataSize, magnitudes, iters);
-        // for (int i=0; i<FRAME_SIZE*NUM_FRAMES; i++){
-        //     int32_t val = (longStore[3*i]<<24)+(longStore[3*i+1]<<16)+(longStore[3*i+2]<<8);
-        //     Serial.println(val);
-        // }
-        // int32_t max0 = 0;
-        // int32_t max0mag = 0;
-        // int32_t max1 = 0;
-        // int32_t max1mag = 0;
-        // int32_t max2 = 0;
-        // int32_t max2mag = 0;
-        // int32_t max3 = 0;
-        // int32_t max3mag = 0;
-        // int32_t max4 = 0;
-        // int32_t max4mag = 0;
-
-        // for (int i=0; i<FRAME_SIZE/2*NUM_FRAMES; i++){
-        //     float frac = (float) i / (float) (FRAME_SIZE/2*NUM_FRAMES);
-        //     float freq = frac * SAMPLE_RATE;
-        //     int32_t mag = magnitudes[i];
-        //     if (mag>max0mag) {
-        //         max0 = freq;
-        //         max0mag = mag;
-        //     }
-        //     else if (mag>max1mag) {
-        //         max1 = freq;
-        //         max1mag = mag;
-        //     }
-        //     else if (mag>max2mag) {
-        //         max2 = freq;
-        //         max2mag = mag;
-        //     }
-        //     else if (mag>max3mag){
-        //          max3 = freq;
-        //          max3mag = mag;
-        //     }
-        //     else if (mag>max4mag) {
-        //         max4 = freq;
-        //         max4mag = mag;
-        //     }
-        // }
-        // Serial.print(max0);
-        // Serial.print(" ");
-        // Serial.print(max1);
-        // Serial.print(" ");
-        // Serial.print(max2);
-        // Serial.print(" ");
-        // Serial.print(max3);
-        // Serial.print(" ");
-        // Serial.println(max4);
-        // memset(longStore, 0, sizeof longStore);
-        // delay(1000);
-    }
-    memset(liveData, 0, sizeof liveData);
-
-#endif // ETHERNET_TEST
-
-#ifdef AI_TEST
-    test_setup();
-    preprocess(longStore, dataSize, magnitudes, pooledMags, iters);
-    intToFloatMags(magnitudes, magFloats, MAG_LENGTH);
-    normaliseFloatMags(magFloats, MAG_LENGTH);
-
-    uint32_t current = micros();
-    inferenceResult = tf.predict(magFloats);
-    uint32_t now = micros();
-    Serial.print("RESULT: ");
-    Serial.println(inferenceResult);
-    Serial.print("TIME (us): ");
-    Serial.println(now-current);
-
-#endif // AI_TEST
-
-#ifdef TREE_TEST
-    test_setup();
-    preprocess(longStore, dataSize, magnitudes, pooledMags, iters);
-    intToFloatMags(pooledMags, magFloats, POOLED_MAG_LENGTH);
-    normaliseFloatMags(magFloats, POOLED_MAG_LENGTH);
-
-    uint32_t current = micros();
-    const int32_t predicted_class = dt_predict(magFloats, POOLED_MAG_LENGTH);
-    uint32_t now = micros();
-    Serial.print("TIME (us): ");
-    Serial.println(now-current);
-    if (predicted_class){
-        Serial.println("EVENT DETECTED");
-    }
-
-#endif //TREE_TEST
-
-#endif // DEPLOY
+    #endif // DEPLOY
+#endif // MULTITHREAD
 }
