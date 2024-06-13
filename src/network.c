@@ -5,6 +5,9 @@
 
 #include <stdint.h>
 #include <network_tflite_data.h>
+#include "config.hpp"
+
+#if  defined(AI_DEPLOY) || defined(AI_TEST) 
 
 #ifdef __cplusplus
 extern "C"
@@ -16453,3 +16456,5 @@ const int g_tflm_network_model_data_len = 197116;
 #ifdef __cplusplus
 }
 #endif
+
+#endif // AI_DEPLOY || AI_TEST
