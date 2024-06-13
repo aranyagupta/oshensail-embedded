@@ -58,3 +58,5 @@ Decision Tree:
 |             Sum             |                     |                |                  710.918                  |   0.9479   |
 
 These results show that, as long as we have an initiation interval above 710.918ms, this model is deployable in a multithreaded fashion. However, due to the udp communication taking 627ms to process and store around 500ms of audio, we will consistently lose around 127 ms of audio in between samples. While unfortunate, this is unavoidable unless deployed on a microcontroller with a higher clock rate. 
+
+Multithreading is currently implemented on this branch, but does NOT work due to a conflict with Ethernet communication - ie, if we even include `stm32duino/STM32duino FreeRTOS@^10.3.2` in the platformio.ini file, ethernet communication fails to work. We are not entirely sure why this is, but we guess that the LwIP library is not implemented thread-safely. If this were to continue into the future, a bare metal interface through the HAL library may need to be used to ensure thread safety. 
