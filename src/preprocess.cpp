@@ -134,7 +134,7 @@ void maxPool(int32_t* magnitudes, int32_t* pooledMags){
 // Max pooling on memory optimized magnitudes
 void maxPool(int32_t* magnitudes, int32_t* pooledMags, uint16_t iteration){
   for (uint16_t row=1; row<NUM_ROWS-1; row+=POOL_STRIDE){
-    uint16_t col = 1;
+    uint16_t col = POOL_SIZE/2;
     int32_t max = magnitudes[coord2dToIndex(col, row, POOL_SIZE)];
 
     for (uint16_t offsetX=-POOL_SIZE/2; offsetX<POOL_SIZE/2+1; offsetX++){
@@ -213,10 +213,6 @@ void preprocess(char* longStore, uint32_t dataSize, int32_t* magnitudes, int32_t
         magnitudes[POOL_SIZE*k+j] = temp_mag[FRAME_SIZE/2-k]; 
       }
     }
-
-    int32_t prior = magnitudes[0];
-    int32_t counter = 1;
-
     // After preprocessing three frames, max pool into pooledMags
     maxPool(magnitudes, pooledMags, i);
     

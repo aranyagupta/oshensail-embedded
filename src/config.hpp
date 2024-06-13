@@ -43,13 +43,12 @@
 #define THRESHOLD 0.5 // threshold for accepted guess
 
 // Deployment options
-// #define DEPLOY
-// #define MULTITHREAD
+#define DEPLOY
 // #define AI_DEPLOY
-// #define TREE_DEPLOY
+#define TREE_DEPLOY
 
 // #define PREPROCESS_TEST
-#define ETHERNET_TEST
+// #define ETHERNET_TEST
 // #define AI_TEST
 // #define TREE_TEST
 
