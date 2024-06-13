@@ -1,17 +1,50 @@
 // Following http://mirlab.org/jang/books/audiosignalprocessing/speechFeatureMfcc.asp?title=12-2%20MFCC
 #include "preprocess.hpp"
 
+// Hamming coefficients for multiplication with frame
+// Stored as const and needs to be manually changed if frame size changes
+// Need them const as otherwise they're stored in ram, which we need to optimize
 const uint16_t hammingCoeffs[FRAME_SIZE] = {
-  20, 20, 20, 20, 21, 21, 21, 22, 22, 23, 24, 24, 25, 26, 27, 28, 29, 30, 31, 33, 34, 35, 37, 38, 40, 42, 43, 45, 47, 49, 51, 53,
-   55, 57, 59, 61, 63, 66, 68, 70, 73, 75, 78, 80, 83, 85, 88, 91, 93, 96, 99, 101, 104, 107, 110, 113, 115, 118, 121, 124, 127, 
-   130, 133, 136, 138, 141, 144, 147, 150, 153, 156, 159, 162, 164, 167, 170, 173, 176, 178, 181, 184, 186, 189, 192, 194, 197, 
-   199, 202, 204, 206, 209, 211, 213, 215, 218, 220, 222, 224, 226, 228, 229, 231, 233, 235, 236, 238, 239, 241, 242, 243, 245,
-    246, 247, 248, 249, 250, 251, 252, 252, 253, 253, 254, 254, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 254, 254, 253, 
-    253, 252, 252, 251, 250, 249, 248, 247, 246, 245, 243, 242, 241, 239, 238, 236, 235, 233, 231, 229, 228, 226, 224, 222, 220, 
-    218, 215, 213, 211, 209, 206, 204, 202, 199, 197, 194, 192, 189, 186, 184, 181, 178, 176, 173, 170, 167, 164, 162, 159, 156,
-     153, 150, 147, 144, 141, 138, 136, 133, 130, 127, 124, 121, 118, 115, 113, 110, 107, 104, 101, 99, 96, 93, 91, 88, 85, 83, 
-     80, 78, 75, 73, 70, 68, 66, 63, 61, 59, 57, 55, 53, 51, 49, 47, 45, 43, 42, 40, 38, 37, 35, 34, 33, 31, 30, 29, 28, 27, 26, 
-     25, 24, 24, 23, 22, 22, 21, 21, 21, 20, 20, 20, 20
+  81, 81, 81, 81, 82, 82, 82, 82, 82, 82, 82, 82, 83, 83, 83, 83, 84, 84, 84, 85, 85, 85, 86, 86, 87, 87, 87, 88, 88, 89, 89, 90, 90, 
+  91, 92, 92, 93, 94, 94, 95, 96, 96, 97, 98, 99, 99, 100, 101, 102, 103, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 
+  115, 116, 117, 118, 120, 121, 122, 123, 124, 126, 127, 128, 129, 131, 132, 133, 134, 136, 137, 139, 140, 141, 143, 144, 146, 147, 
+  149, 150, 152, 153, 155, 156, 158, 159, 161, 163, 164, 166, 168, 169, 171, 173, 174, 176, 178, 180, 181, 183, 185, 187, 189, 190, 
+  192, 194, 196, 198, 200, 202, 204, 206, 208, 210, 212, 214, 216, 218, 220, 222, 224, 226, 228, 230, 232, 234, 236, 239, 241, 243, 
+  245, 247, 249, 252, 254, 256, 258, 261, 263, 265, 268, 270, 272, 275, 277, 279, 282, 284, 286, 289, 291, 294, 296, 298, 301, 303, 
+  306, 308, 311, 313, 316, 318, 321, 323, 326, 328, 331, 333, 336, 339, 341, 344, 346, 349, 352, 354, 357, 359, 362, 365, 367, 370, 
+  373, 375, 378, 381, 383, 386, 389, 392, 394, 397, 400, 403, 405, 408, 411, 414, 416, 419, 422, 425, 427, 430, 433, 436, 439, 441, 
+  444, 447, 450, 453, 456, 458, 461, 464, 467, 470, 473, 475, 478, 481, 484, 487, 490, 493, 495, 498, 501, 504, 507, 510, 513, 516, 
+  518, 521, 524, 527, 530, 533, 536, 539, 542, 545, 547, 550, 553, 556, 559, 562, 565, 568, 571, 573, 576, 579, 582, 585, 588, 591, 
+  594, 597, 599, 602, 605, 608, 611, 614, 617, 619, 622, 625, 628, 631, 634, 637, 639, 642, 645, 648, 651, 654, 656, 659, 662, 665, 
+  668, 671, 673, 676, 679, 682, 684, 687, 690, 693, 696, 698, 701, 704, 707, 709, 712, 715, 717, 720, 723, 726, 728, 731, 734, 736, 
+  739, 742, 744, 747, 749, 752, 755, 757, 760, 762, 765, 768, 770, 773, 775, 778, 780, 783, 785, 788, 790, 793, 795, 798, 800, 803, 
+  805, 808, 810, 813, 815, 817, 820, 822, 825, 827, 829, 832, 834, 836, 838, 841, 843, 845, 848, 850, 852, 854, 857, 859, 861, 863, 
+  865, 867, 870, 872, 874, 876, 878, 880, 882, 884, 886, 888, 890, 892, 894, 896, 898, 900, 902, 904, 906, 908, 910, 912, 914, 915, 
+  917, 919, 921, 923, 925, 926, 928, 930, 931, 933, 935, 937, 938, 940, 942, 943, 945, 946, 948, 950, 951, 953, 954, 956, 957, 959, 
+  960, 961, 963, 964, 966, 967, 968, 970, 971, 972, 974, 975, 976, 978, 979, 980, 981, 982, 984, 985, 986, 987, 988, 989, 990, 991, 
+  992, 993, 994, 995, 996, 997, 998, 999, 1000, 1001, 1002, 1003, 1004, 1004, 1005, 1006, 1007, 1008, 1008, 1009, 1010, 1010, 1011, 
+  1012, 1012, 1013, 1014, 1014, 1015, 1015, 1016, 1016, 1017, 1017, 1018, 1018, 1019, 1019, 1019, 1020, 1020, 1020, 1021, 1021, 1021, 
+  1022, 1022, 1022, 1022, 1023, 1023, 1023, 1023, 1023, 1023, 1023, 1023, 1023, 1023, 1023, 1023, 1023, 1023, 1023, 1023, 1023, 1023, 
+  1023, 1023, 1023, 1023, 1022, 1022, 1022, 1022, 1021, 1021, 1021, 1020, 1020, 1020, 1019, 1019, 1019, 1018, 1018, 1017, 1017, 1016, 
+  1016, 1015, 1015, 1014, 1014, 1013, 1012, 1012, 1011, 1010, 1010, 1009, 1008, 1008, 1007, 1006, 1005, 1004, 1004, 1003, 1002, 1001, 
+  1000, 999, 998, 997, 996, 995, 994, 993, 992, 991, 990, 989, 988, 987, 986, 985, 984, 982, 981, 980, 979, 978, 976, 975, 974, 972, 
+  971, 970, 968, 967, 966, 964, 963, 961, 960, 959, 957, 956, 954, 953, 951, 950, 948, 946, 945, 943, 942, 940, 938, 937, 935, 933, 
+  931, 930, 928, 926, 925, 923, 921, 919, 917, 915, 914, 912, 910, 908, 906, 904, 902, 900, 898, 896, 894, 892, 890, 888, 886, 884, 
+  882, 880, 878, 876, 874, 872, 870, 867, 865, 863, 861, 859, 857, 854, 852, 850, 848, 845, 843, 841, 838, 836, 834, 832, 829, 827, 
+  825, 822, 820, 817, 815, 813, 810, 808, 805, 803, 800, 798, 795, 793, 790, 788, 785, 783, 780, 778, 775, 773, 770, 768, 765, 762, 
+  760, 757, 755, 752, 749, 747, 744, 742, 739, 736, 734, 731, 728, 726, 723, 720, 717, 715, 712, 709, 707, 704, 701, 698, 696, 693, 
+  690, 687, 684, 682, 679, 676, 673, 671, 668, 665, 662, 659, 656, 654, 651, 648, 645, 642, 639, 637, 634, 631, 628, 625, 622, 619, 
+  617, 614, 611, 608, 605, 602, 599, 597, 594, 591, 588, 585, 582, 579, 576, 573, 571, 568, 565, 562, 559, 556, 553, 550, 547, 545, 
+  542, 539, 536, 533, 530, 527, 524, 521, 518, 516, 513, 510, 507, 504, 501, 498, 495, 493, 490, 487, 484, 481, 478, 475, 473, 470, 
+  467, 464, 461, 458, 456, 453, 450, 447, 444, 441, 439, 436, 433, 430, 427, 425, 422, 419, 416, 414, 411, 408, 405, 403, 400, 397, 
+  394, 392, 389, 386, 383, 381, 378, 375, 373, 370, 367, 365, 362, 359, 357, 354, 352, 349, 346, 344, 341, 339, 336, 333, 331, 328, 
+  326, 323, 321, 318, 316, 313, 311, 308, 306, 303, 301, 298, 296, 294, 291, 289, 286, 284, 282, 279, 277, 275, 272, 270, 268, 265, 
+  263, 261, 258, 256, 254, 252, 249, 247, 245, 243, 241, 239, 236, 234, 232, 230, 228, 226, 224, 222, 220, 218, 216, 214, 212, 210, 
+  208, 206, 204, 202, 200, 198, 196, 194, 192, 190, 189, 187, 185, 183, 181, 180, 178, 176, 174, 173, 171, 169, 168, 166, 164, 163, 
+  161, 159, 158, 156, 155, 153, 152, 150, 149, 147, 146, 144, 143, 141, 140, 139, 137, 136, 134, 133, 132, 131, 129, 128, 127, 126, 
+  124, 123, 122, 121, 120, 118, 117, 116, 115, 114, 113, 112, 111, 110, 109, 108, 107, 106, 105, 104, 103, 103, 102, 101, 100, 99, 99, 
+  98, 97, 96, 96, 95, 94, 94, 93, 92, 92, 91, 90, 90, 89, 89, 88, 88, 87, 87, 87, 86, 86, 85, 85, 85, 84, 84, 84, 83, 83, 83, 83, 82, 
+  82, 82, 82, 82, 82, 82, 82, 81, 81, 81, 81
 };
 
 // longStore is the most raw char PCM24 data we can store and at once
@@ -82,11 +115,11 @@ void maxPool(int32_t* magnitudes, int32_t* pooledMags){
   for (uint16_t row=1; row<NUM_ROWS-1; row+=POOL_STRIDE){
     for (uint16_t col=1; col<NUM_COLUMNS-1; col+=POOL_STRIDE){
       // Row is y coordinate, column is x coordinate
-      int32_t max = magnitudes[coord2dToIndex(row, col, NUM_COLUMNS)];
+      int32_t max = magnitudes[coord2dToIndex(col, row, NUM_COLUMNS)];
       
       for (uint16_t offsetX=-POOL_SIZE/2; offsetX<POOL_SIZE/2+1; offsetX++){
         for (uint16_t offsetY=-POOL_SIZE/2; offsetY<POOL_SIZE/2+1; offsetY++){
-          int32_t val = magnitudes[coord2dToIndex(row+offsetX, col+offsetY, NUM_COLUMNS)];
+          int32_t val = magnitudes[coord2dToIndex(col+offsetY, row+offsetX, NUM_COLUMNS)];
           max = (val>max) ? val : max; 
         }
       }
@@ -96,6 +129,26 @@ void maxPool(int32_t* magnitudes, int32_t* pooledMags){
       pooledMags[coord2dToIndex(newCol, newRow, POOLED_NUM_COLUMNS)] = max;
     }
   }
+}
+
+// Max pooling on memory optimized magnitudes
+void maxPool(int32_t* magnitudes, int32_t* pooledMags, uint16_t iteration){
+  for (uint16_t row=1; row<NUM_ROWS-1; row+=POOL_STRIDE){
+    uint16_t col = 1;
+    int32_t max = magnitudes[coord2dToIndex(col, row, POOL_SIZE)];
+
+    for (uint16_t offsetX=-POOL_SIZE/2; offsetX<POOL_SIZE/2+1; offsetX++){
+      for (uint16_t offsetY=-POOL_SIZE/2; offsetY<POOL_SIZE/2+1; offsetY++){
+        int32_t val = magnitudes[coord2dToIndex(col+offsetY, row+offsetX, POOL_SIZE)];
+        max = (val>max) ? val : max; 
+      }
+    }
+
+    uint16_t newRow = row/POOL_SIZE;
+    uint16_t newCol = iteration;
+    pooledMags[coord2dToIndex(newCol, newRow, POOLED_NUM_COLUMNS)] = max;
+  }
+
 }
 
 
@@ -113,6 +166,7 @@ void preprocess(char* longStore, uint32_t dataSize, int32_t* magnitudes, int32_t
   int32_t temp_freq[FRAME_SIZE];
 
   // perform fft on each hamming windowed frame of length 1024
+  #if !(defined(TREE_DEPLOY) || defined(TREE_TEST) || defined(PREPROCESS_TEST))
   for (uint16_t i=0; i<iters; i++){
     // Applies hamming windowing to one frame at a time, due to overlap between frames when hop length<frame size
     memcpy(temp_frame, longStore+i*HOP_LENGTH*3, FRAME_SIZE*3);
@@ -127,12 +181,47 @@ void preprocess(char* longStore, uint32_t dataSize, int32_t* magnitudes, int32_t
       Code below stores as flattened spectrogram [48kHz magnitudes across all times, 46kHz magnitudes at all times, ...] shape 513x94      
     */
     for (uint16_t j=0; j<FRAME_SIZE/2+1; j++){
-      magnitudes[NUM_COLUMNS*j+i] = temp_mag[FRAME_SIZE/2+1-j]; 
+      magnitudes[NUM_COLUMNS*j+i] = temp_mag[FRAME_SIZE/2-j]; 
     }
   }
 
   // Perform max pooling 3x3, no padding, no dilation, stride 3
   #if defined(TREE_TEST) || defined(TREE_DEPLOY)
   maxPool(magnitudes, pooledMags);
+  #endif // TREE_TEST || TREE_DEPLOY
+
+  #endif // MULTITHREAD
+
+  // Memory optimized preprocessing
+
+  #if defined(TREE_DEPLOY) || defined(TREE_TEST) || defined(PREPROCESS_TEST)
+
+  for (uint16_t i=0; i<iters/POOL_SIZE; i++){
+    // Fully preprocesses three frames at a time and stores them into magnitudes
+    for (uint16_t j=0; j<POOL_SIZE; j++){
+      memcpy(temp_frame, longStore+(POOL_SIZE*i+j)*HOP_LENGTH*3, FRAME_SIZE*3);
+      hammingWindowing(temp_frame, FRAME_SIZE);
+    
+      Approx_FFT(temp_frame, FRAME_SIZE, SAMPLE_RATE, temp_mag, temp_freq);
+      
+      // memcpy(magnitudes+i*(FRAME_SIZE/2+1), temp_mag, (FRAME_SIZE/2+1)*4); // 4 bytes per int
+
+      /* memcpy stores as [FFT at t=0, FFT at t=1, ...] shape 94x513
+        Code below stores as flattened spectrogram [48kHz magnitudes across all times, 46kHz magnitudes at all times, ...] shape 513x3      
+      */
+      for (uint16_t k=0; k<FRAME_SIZE/2+1; k++){
+        magnitudes[POOL_SIZE*k+j] = temp_mag[FRAME_SIZE/2-k]; 
+      }
+    }
+
+    int32_t prior = magnitudes[0];
+    int32_t counter = 1;
+
+    // After preprocessing three frames, max pool into pooledMags
+    maxPool(magnitudes, pooledMags, i);
+    
+  }
+
   #endif
+
 }

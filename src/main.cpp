@@ -38,7 +38,14 @@ char (*lS1ptr)[LONG_STORE_LENGTH] = &longStore1;
 
 const uint32_t dataSize = LONG_STORE_LENGTH / 3; // Total number of samples in longStore
 const uint32_t iters = dataSize / HOP_LENGTH; // Number of individual FFTs we need to store
+#if ! (defined(TREE_DEPLOY) || defined(TREE_TEST) || defined(PREPROCESS_TEST))
 int32_t magnitudes[MAG_LENGTH]; // spectrogram developed out of raw audio data
+#endif // MULTITHREAD
+
+#if  defined(TREE_DEPLOY) || defined(TREE_TEST) || defined(PREPROCESS_TEST)
+int32_t magnitudes[MAG_LENGTH_FOR_POOLING];
+#endif
+
 int32_t pooledMags[POOLED_MAG_LENGTH]; // pooled magnitudes length
 #if defined(TREE_TEST) || defined(TREE_DEPLOY) || defined(PREPROCESS_TEST)
 float magFloats[POOLED_MAG_LENGTH]; // cast to float array
@@ -310,7 +317,7 @@ void scaleIntMags(int32_t* magnitudes){
                     longStorePtr = lS1ptr;
                 }
 
-                preprocess(*longStorePtr, dataSize, magnitudes, iters);
+                preprocess(*longStorePtr, dataSize, magnitudes, pooledMags, iters);
                     #ifdef AI_DEPLOY
                         intToFloatMags(magnitudes, magFloats);
                         normaliseFloatMags(magFloats);
@@ -320,7 +327,113 @@ void scaleIntMags(int32_t* magnitudes){
                         }
                     #endif // AI_DEPLOY
                     #ifdef TREE_DEPLOY
-                        intToFloatMags(magnitudes, magFloats, POOLED_MAG_LENGTH);
+                        intToFloatMags(pooledMags, magFloats, POOLED_MAG_LENGTH);
+                        normaliseFloatMags(magFloats, POOLED_MAG_LENGTH);
+                        int32_t predicted_class = dt_predict(magFloats, POOLED_MAG_LENGTH);
+                        if (predicted_class){
+                            Serial.println("EVENT DETECTED");
+                        }
+                    #endif // TREE_DEPLOY
+                
+                memset(*longStorePtr, 0, sizeof *longStorePtr);
+
+                if(preprocInferenceTaskBufSide == 0){
+                    preprocInferenceTaskBufSide = 1;
+                    longStorePtr = lS1ptr;
+                    xSemaphoreGive(longStore0Mutex);
+                }else{
+                    preprocInferenceTaskBufSide = 0;
+                    longStorePtr = lS0ptr;
+                    xSemaphoreGive(longStore1Mutex);
+                }
+            }
+        #endif
+    }
+#endif
+
+#ifdef MULTITHREAD
+    //ethernet comms task for multithreading
+    void ethernetTask(void * pvParameters){
+        #ifdef DEPLOY // Deploying full communication stream
+
+            bool ethernetTaskBufSide = *(bool *)pvParameters;
+            char (*longStorePtr)[LONG_STORE_LENGTH];
+
+            while(1){
+                if(ethernetTaskBufSide == 0){
+                    xSemaphoreTake(longStore0Mutex, portMAX_DELAY);
+                    longStorePtr = lS0ptr;
+                }else{
+                    xSemaphoreTake(longStore1Mutex, portMAX_DELAY);
+                    longStorePtr = lS1ptr;
+                }
+
+                receiveDatagram(tracStreamServer, liveData);
+                tracStatus status = parseDatagram(liveData, *longStorePtr);
+                if (status == FINISH){
+                    //Do  nothing, preprocessing task will take over
+                } 
+                else if (status==INVALID){
+                    //set this side of double buffer to 0s
+                    memset(*longStorePtr, 0, sizeof *longStorePtr);
+                }
+                memset(liveData, 0, sizeof liveData);
+
+                /* Handle TCP Communication (TracIO) */
+
+                // Read TracIO data from client into buffer if available
+                uint16_t size = client.available();
+                client.readBytes(tracIOBuffer, size);
+
+                // Decode tracIO buffer - if okay, respond with same thing
+                if (decodeTracIO(tracIOBuffer) == OK)
+                {
+                    tracIOServer.write(tracIOBuffer, size);
+                }
+
+                //at the end of ethernet read cycle, 
+                //  -> switch the ptr for this task to process other side of double buffer
+                //  -> give up the mutex to this side of double buffer
+                if(ethernetTaskBufSide == 0){
+                    ethernetTaskBufSide = 1;
+                    longStorePtr = lS1ptr;
+                    xSemaphoreGive(longStore0Mutex);
+                }else{
+                    ethernetTaskBufSide = 0;
+                    longStorePtr = lS0ptr;
+                    xSemaphoreGive(longStore1Mutex);
+                }
+            }
+        #endif
+    }
+
+    //prepreprocessing and inference task for multithreading
+    void preprocessInferenceTask(void * pvParameters){
+        #ifdef DEPLOY // Deploying full communication stream
+
+            bool preprocInferenceTaskBufSide = *(bool *)pvParameters;
+            char (*longStorePtr)[LONG_STORE_LENGTH];
+
+            while(1){
+                if(preprocInferenceTaskBufSide == 0){
+                    xSemaphoreTake(longStore0Mutex, portMAX_DELAY);
+                    longStorePtr = lS0ptr;
+                }else{
+                    xSemaphoreTake(longStore1Mutex, portMAX_DELAY);
+                    longStorePtr = lS1ptr;
+                }
+
+                preprocess(*longStorePtr, dataSize, magnitudes, pooledMags, iters);
+                    #ifdef AI_DEPLOY
+                        intToFloatMags(magnitudes, magFloats);
+                        normaliseFloatMags(magFloats);
+                        inferenceResult = tf.predict(magFloats);
+                        if (inferenceResult>THRESHOLD) {
+                            Serial.println("EVENT DETECTED");
+                        }
+                    #endif // AI_DEPLOY
+                    #ifdef TREE_DEPLOY
+                        intToFloatMags(pooledMags, magFloats, POOLED_MAG_LENGTH);
                         normaliseFloatMags(magFloats, POOLED_MAG_LENGTH);
                         int32_t predicted_class = dt_predict(magFloats, POOLED_MAG_LENGTH);
                         if (predicted_class){
@@ -378,19 +491,30 @@ void setup()
 #endif
     /* Register event handlers for error, match,j and event */
 
-    #ifdef DEPLOY
-        /* Setup Ethernet communication and ensure client is available */
-        Ethernet.begin(mac, ip);
-        while (Ethernet.linkStatus() == LinkOFF)
-        {
-            Serial.println("Ethernet cable is not connected.");
-            delay(100);
-        }
+#ifdef DEPLOY
+    /* Setup Ethernet communication and ensure client is available */
+    Ethernet.begin(mac, ip);
+    while (Ethernet.linkStatus() == LinkOFF)
+    {
+        Serial.println("Ethernet cable is not connected.");
+        delay(100);
+    }
+    Serial.println("HERE 1");
 
         tracIOServer.begin();
+    Serial.println("HERE 2");
+
         tracStreamServer.begin(UDP_PORT);
+    Serial.println("HERE 3");
+
         
         client.setConnectionTimeout(0xFFFF);
+    Serial.println("HERE 4");
+
+
+    porpoiseSetup(tracIOServer, client, tracIOBuffer);
+    Serial.println("HERE 5");
+
 
     // Begin tf instance with model data
     #if defined(AI_DEPLOY) || defined(AI_TEST)
@@ -422,18 +546,19 @@ void setup()
         }
         Serial.println("LINK OK");
 
-        tracIOServer.begin();
-        Serial.println("BEGAN tracIO");
-        tracStreamServer.begin(UDP_PORT);
-        Serial.println("BEGAN tracStream");
-        // do
-        // {
-        //     delay(500);
-        //     client = tracIOServer.available();
-        // } while (!client.connected());
-        Serial.println("GOT CLIENT");
-        client.setConnectionTimeout(0xFFFF);
-    #endif // ETHERNET_TEST
+    // tracIOServer.begin();
+    // Serial.println("BEGAN tracIO");
+    tracStreamServer.begin(UDP_PORT);
+    Serial.println("BEGAN tracStream");
+    // do
+    // {
+    //     delay(500);
+    //     client = tracIOServer.available();
+    // } while (!client.connected());
+    // Serial.println("GOT CLIENT");
+    // client.setConnectionTimeout(0xFFFF);
+    // porpoiseSetup(tracIOServer, client, tracIOBuffer);
+#endif // ETHERNET_TEST
 
     #ifdef AI_TEST
         // Handle ai_input/output
@@ -464,6 +589,7 @@ void loop()
         if (status == FINISH)
         {
             preprocess(longStore, dataSize, magnitudes, pooledMags, iters);
+            Serial.println("preprocessed");
         #ifdef AI_DEPLOY
             intToFloatMags(magnitudes, magFloats, MAG_LENGTH);
             normaliseFloatMags(magFloats, MAG_LENGTH);
@@ -473,9 +599,12 @@ void loop()
             }
         #endif // AI_DEPLOY
         #ifdef TREE_DEPLOY
-            intToFloatMags(magnitudes, magFloats, POOLED_MAG_LENGTH);
+            intToFloatMags(pooledMags, magFloats, POOLED_MAG_LENGTH);
+            Serial.println("float");
             normaliseFloatMags(magFloats, POOLED_MAG_LENGTH);
+            Serial.println("norm");
             int32_t predicted_class = dt_predict(magFloats, POOLED_MAG_LENGTH);
+            Serial.println(predicted_class);
             if (predicted_class){
                 Serial.println("EVENT DETECTED");
             }
@@ -517,7 +646,6 @@ void loop()
 
     #ifdef ETHERNET_TEST
 
-        
         receiveDatagram(tracStreamServer, liveData);
         tracStatus status = parseDatagram(liveData, longStore);
 
@@ -525,60 +653,6 @@ void loop()
             Serial.print(micros()-current);
             Serial.println(" us to End");
             current = micros();
-
-
-            // preprocess(longStore, dataSize, magnitudes, iters);
-            // for (int i=0; i<FRAME_SIZE*NUM_FRAMES; i++){
-            //     int32_t val = (longStore[3*i]<<24)+(longStore[3*i+1]<<16)+(longStore[3*i+2]<<8);
-            //     Serial.println(val);
-            // }
-            // int32_t max0 = 0;
-            // int32_t max0mag = 0;
-            // int32_t max1 = 0;
-            // int32_t max1mag = 0;
-            // int32_t max2 = 0;
-            // int32_t max2mag = 0;
-            // int32_t max3 = 0;
-            // int32_t max3mag = 0;
-            // int32_t max4 = 0;
-            // int32_t max4mag = 0;
-
-            // for (int i=0; i<FRAME_SIZE/2*NUM_FRAMES; i++){
-            //     float frac = (float) i / (float) (FRAME_SIZE/2*NUM_FRAMES);
-            //     float freq = frac * SAMPLE_RATE;
-            //     int32_t mag = magnitudes[i];
-            //     if (mag>max0mag) {
-            //         max0 = freq;
-            //         max0mag = mag;
-            //     }
-            //     else if (mag>max1mag) {
-            //         max1 = freq;
-            //         max1mag = mag;
-            //     }
-            //     else if (mag>max2mag) {
-            //         max2 = freq;
-            //         max2mag = mag;
-            //     }
-            //     else if (mag>max3mag){
-            //          max3 = freq;
-            //          max3mag = mag;
-            //     }
-            //     else if (mag>max4mag) {
-            //         max4 = freq;
-            //         max4mag = mag;
-            //     }
-            // }
-            // Serial.print(max0);
-            // Serial.print(" ");
-            // Serial.print(max1);
-            // Serial.print(" ");
-            // Serial.print(max2);
-            // Serial.print(" ");
-            // Serial.print(max3);
-            // Serial.print(" ");
-            // Serial.println(max4);
-            // memset(longStore, 0, sizeof longStore);
-            // delay(1000);
         }
         memset(liveData, 0, sizeof liveData);
 
