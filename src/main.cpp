@@ -229,8 +229,12 @@ void loop()
         intToFloatMags(pooledMags, magFloats, POOLED_MAG_LENGTH);
         normaliseFloatMags(magFloats, POOLED_MAG_LENGTH);
         int32_t predicted_class = dt_predict(magFloats, POOLED_MAG_LENGTH);
+        Serial.print("PREDICTING.. ");
         if (predicted_class){
             Serial.println("EVENT DETECTED");
+        }
+        else{
+            Serial.println("EVENT NOT DETECTED");
         }
     #endif // TREE_DEPLOY
         memset(longStore, 0, sizeof longStore);

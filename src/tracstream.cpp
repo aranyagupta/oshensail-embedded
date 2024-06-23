@@ -4,7 +4,7 @@ uint32_t longStoreTracker(0);
 // Receive a datagram from UDP and put it into liveData
 void receiveDatagram(EthernetUDP& tracStreamServer, char* liveData){
   int32_t packetSize = tracStreamServer.parsePacket();
-  if (packetSize <= LIVE_DATA_LENGTH){
+  if (packetSize <= LIVE_DATA_LENGTH && packetSize !=0){
     tracStreamServer.read(liveData, packetSize);
 
   }
