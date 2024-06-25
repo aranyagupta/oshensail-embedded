@@ -31,11 +31,28 @@ We use the TFLite Micro framework and the EloquentTinyML library to perform infe
 - Adjust `NUM_INPUTS`, `NUM_OUTPUTS` and `TENSOR_ARENA_SIZE` in `config.h` to the values required by the model. `NUM_INPUTS` and `NUM_OUTPUTS` depend on the input and output size of the model you trained. `TENSOR_ARENA_SIZE` needs to be fiddled around with to find the correct size; if you make it really small and try to deploy it, an error will print to serial telling you the required size.
 - Adjust the inference method in main to whatever is necessary. Currently it stores just a float telling us the probability that the current spectrogram has an event and thresholds it at 0.5 to give a result.
 
-### Decision tree
-ML People - how did you use EML?
+### Decision trees and Random Forests
 
+We use the [emlearn](https://github.com/emlearn/emlearn) library to convert sklearn tree models into C code.
+
+```[python]
+import emlearn
+import joblib
+
+# Save the model using joblib (emlearn prefers joblib, can also load models later)
+joblib.dump(tree_estimator, 'path/model.joblib')
+
+# # Load the model using emlearn
+model = joblib.load('path/model.joblib')
+
+c_model = emlearn.convert(model, method='inline')
+
+# Save the C code to a file
+c_model.save(file='path/model.h', name='tree')
+```
 
 ## Notes
+
 Constants are defined in the [config.hpp](config.hpp) file. These constants and the rest of the codebase have been set up such that changing these constants (for example, to increase the size of spectrograms/amount of raw audio data stored) should be possible and easy, allowing models to become larger or smaller quickly and easily. Limited testing has been done and it does appear to work, but no promises!
 
 Individual tests for ethernet communication, neural networks, decision trees and preprocessing can also be found in [main.cpp](main.cpp), and there are preprocessed constants available to test each part individually before deploying. To test, comment out `#define DEPLOY`, `#define AI_DEPLOY` and `#TREE_DEPLOY` near the top of the file, and uncomment the required test defines to test individually.
