@@ -6,17 +6,22 @@
 #include <STM32FreeRTOS.h>
 #include "network_tflite_data.h"
 #include "network_config.h"
-
+#include <FreeRTOS_IP.h>
 
 #include "random_forest_85_float32.h"
 
 // Ethernet information/setup variables
 uint8_t mac[] = {0x00, 0xAA, 0xBB, 0xCC, 0xDA, 0x02};
-IPAddress ip(169, 254, 34, 1);         // the IP address of the ethernet shield (array of 4 bytes)
-EthernetServer tracIOServer(TCP_PORT); // TracIO Server Port for TCP/IP Communication
-EthernetClient client;                 // TCP/IP Client for reading TracIO Data
+uint8_t ip[] = {169, 254, 34, 1};
+uint8_t gateway[] = {169, 254, 34, 1};
+uint8_t dns[] = {169, 254, 34, 1};
+uint8_t subnet[] = {255, 255, 255, 0};
+// IPAddress ip(169, 254, 34, 1);         // the IP address of the ethernet shield (array of 4 bytes)
+// IPAddress subnet(255, 255, 255, 0);
+// EthernetServer tracIOServer(TCP_PORT); // TracIO Server Port for TCP/IP Communication
+// EthernetClient client;                 // TCP/IP Client for reading TracIO Data
 char tracIOBuffer[TCP_BUFFER_LENGTH];  // Buffer to read client device TracIO data
-EthernetUDP tracStreamServer;          // TracStream client for UDP communication
+//EthernetUDP tracStreamServer;          // TracStream client for UDP communication
 char liveData[LIVE_DATA_LENGTH];       // structure holding raw hydrophone data for one packet
 #ifndef MULTITHREAD
 char longStore[LONG_STORE_LENGTH];     // structure holding hydrophone data over several packets
@@ -67,13 +72,6 @@ float inferenceResult;
 Eloquent::TinyML::TfLite<NUM_INPUTS, NUM_OUTPUTS, TENSOR_ARENA_SIZE> tf;
 #endif
 
-#ifdef MULTITHREAD
-TaskHandle_t ethernetHandle = NULL;
-TaskHandle_t preprocessInferenceHandle = NULL;
-SemaphoreHandle_t longStore0Mutex;
-SemaphoreHandle_t longStore1Mutex;
-#endif
-
 void test_setup()
 {
     int16_t kmax = LONG_STORE_LENGTH / (FRAME_SIZE * 3);
@@ -93,6 +91,33 @@ void test_setup()
                 #endif
             }
         }
+    }
+}
+
+//User-definition of this function is required buy TCP/IP stack
+//This would be better if hardware-generated, but not done for now
+BaseType_t xApplicationGetRandomNumber( uint32_t * pulNumber ){
+    *pulNumber = rand();
+    return pdTRUE;
+};
+
+uint32_t ulApplicationGetNextSequenceNumber( uint32_t ulSourceAddress,
+                                             uint16_t usSourcePort,
+                                             uint32_t ulDestinationAddress,
+                                             uint16_t usDestinationPort )
+{
+    return rand();
+}
+
+void vApplicationPingReplyHook( ePingReplyStatus_t eStatus, uint16_t usIdentifier )
+{
+    if( eStatus == eSuccess )
+    {
+        // Handle successful ping reply
+    }
+    else
+    {
+        // Handle failed ping reply
     }
 }
 
@@ -141,11 +166,98 @@ void scaleIntMags(int32_t* magnitudes){
 
 #ifdef MULTITHREAD
     //ethernet comms task for multithreading
-    void ethernetTask(void * pvParameters){
+    // void ethernetTask(void * pvParameters){
+    //     #ifdef DEPLOY // Deploying full communication stream
+
+    //         bool ethernetTaskBufSide = *(bool *)pvParameters;
+    //         char (*longStorePtr)[LONG_STORE_LENGTH];
+
+    //         while(1){
+    //             if(ethernetTaskBufSide == 0){
+    //                 xSemaphoreTake(longStore0Mutex, portMAX_DELAY);
+    //                 longStorePtr = lS0ptr;
+    //             }else{
+    //                 xSemaphoreTake(longStore1Mutex, portMAX_DELAY);
+    //                 longStorePtr = lS1ptr;
+    //             }
+
+    //             receiveDatagram(tracStreamServer, liveData);
+    //             tracStatus status = parseDatagram(liveData, *longStorePtr);
+    //             if (status == FINISH){
+    //                 //Do  nothing, preprocessing task will take over
+    //             } 
+    //             else if (status==INVALID){
+    //                 //set this side of double buffer to 0s
+    //                 memset(*longStorePtr, 0, sizeof *longStorePtr);
+    //             }
+    //             memset(liveData, 0, sizeof liveData);
+
+    //             /* Handle TCP Communication (TracIO) */
+
+    //             // Read TracIO data from client into buffer if available
+    //             uint16_t size = client.available();
+    //             client.readBytes(tracIOBuffer, size);
+
+    //             // Decode tracIO buffer - if okay, respond with same thing
+    //             if (decodeTracIO(tracIOBuffer) == OK)
+    //             {
+    //                 tracIOServer.write(tracIOBuffer, size);
+    //             }
+
+    //             //at the end of ethernet read cycle, 
+    //             //  -> switch the ptr for this task to process other side of double buffer
+    //             //  -> give up the mutex to this side of double buffer
+    //             if(ethernetTaskBufSide == 0){
+    //                 ethernetTaskBufSide = 1;
+    //                 longStorePtr = lS1ptr;
+    //                 xSemaphoreGive(longStore0Mutex);
+    //             }else{
+    //                 ethernetTaskBufSide = 0;
+    //                 longStorePtr = lS0ptr;
+    //                 xSemaphoreGive(longStore1Mutex);
+    //             }
+    //         }
+    //     #endif
+    // }
+
+    static void ethernetTask( void *pvParameters ){
+        Serial.println("ethernet task");
         #ifdef DEPLOY // Deploying full communication stream
+            long lBytes;
+            struct freertos_sockaddr xClient, xBindAddress;
+            uint32_t xClientLength = sizeof( xClient );
+            Socket_t xListeningSocket;
+            const TickType_t xSendTimeOut = 200 / portTICK_PERIOD_MS;
 
             bool ethernetTaskBufSide = *(bool *)pvParameters;
             char (*longStorePtr)[LONG_STORE_LENGTH];
+
+            /* Attempt to open the UDP socket. */
+            xListeningSocket = FreeRTOS_socket( FREERTOS_AF_INET, 
+                                                    /* Use FREERTOS_AF_INET6 for IPv6 UDP socket */
+                                                FREERTOS_SOCK_DGRAM,
+                                                    /*FREERTOS_SOCK_DGRAM for UDP.*/
+                                                FREERTOS_IPPROTO_UDP );
+
+            /* Check for errors. */
+            if(xListeningSocket == FREERTOS_INVALID_SOCKET){
+                Serial.println("UDP Socket invalid, couldn't be created");
+                delay(100);
+            };
+
+            /* Ensure calls to FreeRTOS_sendto() timeout if a network buffer cannot be
+            obtained within 200ms. */
+            FreeRTOS_setsockopt( xListeningSocket,
+                                    0,
+                                    FREERTOS_SO_SNDTIMEO,
+                                    &xSendTimeOut,
+                                    sizeof( xSendTimeOut ) );
+
+            /* Bind the socket to UDP_PORT - defined in config.hpp. */
+                memset( &xBindAddress, 0, sizeof(xBindAddress) );
+                xBindAddress.sin_port = FreeRTOS_htons( UDP_PORT );
+                xBindAddress.sin_family = FREERTOS_AF_INET; /* FREERTOS_AF_INET6 to be used for IPv6 */
+                FreeRTOS_bind( xListeningSocket, &xBindAddress, sizeof( xBindAddress ) );
 
             while(1){
                 if(ethernetTaskBufSide == 0){
@@ -156,28 +268,43 @@ void scaleIntMags(int32_t* magnitudes){
                     longStorePtr = lS1ptr;
                 }
 
-                receiveDatagram(tracStreamServer, liveData);
-                tracStatus status = parseDatagram(liveData, *longStorePtr);
-                if (status == FINISH){
-                    //Do  nothing, preprocessing task will take over
-                } 
-                else if (status==INVALID){
-                    //set this side of double buffer to 0s
-                    memset(*longStorePtr, 0, sizeof *longStorePtr);
-                }
-                memset(liveData, 0, sizeof liveData);
+                /* Receive data from the socket.  ulFlags is zero, so the standard
+                    interface is used.  By default the block time is portMAX_DELAY, but it
+                    can be changed using FreeRTOS_setsockopt(). */
+                lBytes = FreeRTOS_recvfrom( xListeningSocket,
+                                            liveData,
+                                            LIVE_DATA_LENGTH,
+                                            0,
+                                            &xClient,
+                                            &xClientLength );
 
+                if( lBytes > 0 )
+                {
+                    /* Data was received and can be process here. */
+                    //receiveDatagram(tracStreamServer, liveData);
+                    tracStatus status = parseDatagram(liveData, *longStorePtr);
+                    if (status == FINISH){
+                        //Do  nothing, preprocessing task will take over
+                    } 
+                    else if (status==INVALID){
+                        //set this side of double buffer to 0s
+                        memset(*longStorePtr, 0, sizeof *longStorePtr);
+                    }
+                    memset(liveData, 0, sizeof liveData);
+                }
+
+                //ALL TCP/TRACIO STUFF MORE OR LESS USELESS
                 /* Handle TCP Communication (TracIO) */
 
                 // Read TracIO data from client into buffer if available
-                uint16_t size = client.available();
-                client.readBytes(tracIOBuffer, size);
+                // uint16_t size = client.available();
+                // client.readBytes(tracIOBuffer, size);
 
-                // Decode tracIO buffer - if okay, respond with same thing
-                if (decodeTracIO(tracIOBuffer) == OK)
-                {
-                    tracIOServer.write(tracIOBuffer, size);
-                }
+                // // Decode tracIO buffer - if okay, respond with same thing
+                // if (decodeTracIO(tracIOBuffer) == OK)
+                // {
+                //     tracIOServer.write(tracIOBuffer, size);
+                // }
 
                 //at the end of ethernet read cycle, 
                 //  -> switch the ptr for this task to process other side of double buffer
@@ -192,11 +319,12 @@ void scaleIntMags(int32_t* magnitudes){
                     xSemaphoreGive(longStore1Mutex);
                 }
             }
-        #endif
+        #endif //DEPLOY
     }
 
     //prepreprocessing and inference task for multithreading
     void preprocessInferenceTask(void * pvParameters){
+        Serial.println("preproc task");
         #ifdef DEPLOY // Deploying full communication stream
 
             bool preprocInferenceTaskBufSide = *(bool *)pvParameters;
@@ -245,6 +373,42 @@ void scaleIntMags(int32_t* magnitudes){
     }
 #endif
 
+#ifdef MULTITHREAD
+
+//vApplicationIPNetworkEventHook called when network ready for use
+void vApplicationIPNetworkEventHook( eIPCallbackEvent_t eNetworkEvent )
+{
+    Serial.println("network event hook");
+    static BaseType_t xTasksAlreadyCreated = pdFALSE;
+
+    /* Both eNetworkUp and eNetworkDown events can be processed here. */
+    if( eNetworkEvent == eNetworkUp )
+    {
+        Serial.println("Network UP.");
+        /* Create the tasks that use the TCP/IP stack if they have not already
+        been created. */
+        if( xTasksAlreadyCreated == pdFALSE )
+        {
+            //ethernetTask initiliasies this to 0, preprocTask initialises this to 1
+            bool ethernetTaskBufSide = 0;
+            /*
+             * For convenience, tasks that use FreeRTOS-Plus-TCP can be created here
+             * to ensure they are not created before the network is usable.
+             */
+                xTaskCreate(
+                ethernetTask,                       /* Function that implements the task */
+                "ethernet",                         /* Text name for the task */
+                64,                                 /* Stack size in words, not bytes */ //CHANGE STACK SIZE TO MAKE SURE NOT OVERFLOWING 
+                &ethernetTaskBufSide,               /* Parameter passed into the task */
+                1,	                                /* Task priority */
+                &ethernetHandle                     /* Pointer to store the task handle */
+            );
+
+            xTasksAlreadyCreated = pdTRUE;
+        }
+    }
+}
+#endif
 
 void setup()
 {
@@ -253,20 +417,21 @@ void setup()
     Serial.println("START SETUP");
 
 #ifdef MULTITHREAD
+    //setup ethernet comms
+    FreeRTOS_IPInit( ip,
+                    subnet,
+                    gateway,
+                    dns,
+                    mac );
+    Serial.println("UDP Socket initialised");
+
     longStore0Mutex = xSemaphoreCreateMutex();
     longStore1Mutex = xSemaphoreCreateMutex();
 
-    bool ethernetTaskBufSide = 0;
+    //ethernetTask initiliasies this to 0, preprocTask initialises this to 1
     bool preprocInferenceTaskBufSide = 1;
 
-    xTaskCreate(
-        ethernetTask,                       /* Function that implements the task */
-        "ethernet",                         /* Text name for the task */
-        64,                                 /* Stack size in words, not bytes */ //CHANGE STACK SIZE TO MAKE SURE NOT OVERFLOWING 
-        &ethernetTaskBufSide,               /* Parameter passed into the task */
-        1,	                                /* Task priority */
-        &ethernetHandle                     /* Pointer to store the task handle */
-    );
+    //ethernetTask created in vApplicationIPNetworkEventHook
 
     xTaskCreate(
         preprocessInferenceTask,            /* Function that implements the task */
@@ -281,27 +446,34 @@ void setup()
 
 #ifdef DEPLOY
     /* Setup Ethernet communication and ensure client is available */
-    Ethernet.begin(mac, ip);
-    while (Ethernet.linkStatus() == LinkOFF)
-    {
-        Serial.println("Ethernet cable is not connected.");
+    //Ethernet.begin(mac, ip);
+                     
+    // while (Ethernet.linkStatus() == LinkOFF)
+    // {
+    //     Serial.println("Ethernet cable is not connected.");
+    //     delay(100);
+    // }
+
+    if (FreeRTOS_IsNetworkUp() == pdFALSE) {
+    // Network is down
+        Serial.println("Network is down.");
         delay(100);
     }
-    Serial.println("HERE 1");
+    // Serial.println("HERE 1");
 
-        tracIOServer.begin();
-    Serial.println("HERE 2");
+    //     tracIOServer.begin();
+    // Serial.println("HERE 2");
 
-        tracStreamServer.begin(UDP_PORT);
-    Serial.println("HERE 3");
+    //     tracStreamServer.begin(UDP_PORT);
+    // Serial.println("HERE 3");
 
         
-        client.setConnectionTimeout(0xFFFF);
-    Serial.println("HERE 4");
+    //     client.setConnectionTimeout(0xFFFF);
+    // Serial.println("HERE 4");
 
 
-    porpoiseSetup(tracIOServer, client, tracIOBuffer);
-    Serial.println("HERE 5");
+    // porpoiseSetup(tracIOServer, client, tracIOBuffer);
+    // Serial.println("HERE 5");
 
 
     // Begin tf instance with model data
@@ -322,6 +494,7 @@ void setup()
         Serial.println("Finished setting up test");
     #endif // PREPROCESS_TEST
 
+    //REMOVE
     #ifdef ETHERNET_TEST
 
         Ethernet.begin(mac, ip);

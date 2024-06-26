@@ -6,6 +6,8 @@
         "approxfft.h": "c",
         "trac.h": "c",
         "cstdint": "cpp",
-        "compare": "cpp"
+        "compare": "cpp",
+        "freertos_ip.h": "c",
+        "freertos.h": "c"
     }
 }

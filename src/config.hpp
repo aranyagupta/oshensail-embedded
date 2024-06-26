@@ -44,7 +44,7 @@
 
 // Deployment options
 #define DEPLOY
-// #define MULTITHREAD
+#define MULTITHREAD
 // #define AI_DEPLOY
 #define TREE_DEPLOY
 
